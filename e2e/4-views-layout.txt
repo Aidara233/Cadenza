@@ -1,0 +1,64 @@
+# layout geometry + remaining views
+goto http://127.0.0.1:17994/#stage
+until !!document.querySelector(".prog-row") ;; 6000
+eval document.querySelector(".prog-row").click()
+until document.querySelector('#conn').dataset.state === 'open'
+until document.querySelectorAll('.msg').length > 5 ;; 6000
+eval (() => { const r = (s) => { const b = document.querySelector(s)?.getBoundingClientRect(); return b ? `${s}=${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}x${Math.round(b.height)}` : s + "=MISSING"; }; return [".topbar", ".programme", ".score", ".mixer", ".composer", ".statusbar", "#staff", ".gauge"].map(r).join(" | "); })()
+expect document.documentElement.scrollWidth <= innerWidth && document.body.scrollHeight <= innerHeight + 1
+expect document.querySelector('.programme').getBoundingClientRect().width > 200 && document.querySelector('.mixer').getBoundingClientRect().width > 250
+expect document.querySelector('.composer').getBoundingClientRect().bottom <= document.querySelector('.statusbar').getBoundingClientRect().top + 1
+expect getComputedStyle(document.body).backgroundColor === 'rgb(20, 17, 14)'
+expect [...document.querySelectorAll('.msg')].every(m => m.getBoundingClientRect().width > 300)
+expect document.querySelectorAll('.prog-row.current').length === 1
+eval (() => { const els = [...document.querySelectorAll('.tc-sum,.pr-title,.sh-title')]; return els.filter(e => e.scrollWidth > e.clientWidth + 1).length + ' truncated of ' + els.length; })()
+# palette
+eval document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true })) || window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }))
+until !!document.querySelector('dialog.palette[open]') ;; 2000
+eval (() => { const i = document.querySelector('.pal-inp'); i.value = '账簿'; i.dispatchEvent(new Event('input')); return document.querySelectorAll('.pal-item').length; })()
+shot 13-palette
+eval document.querySelector('.pal-inp').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+until location.hash === '#ledger' ;; 2000
+# ledger
+until !!document.querySelector('.lg-stats') ;; 6000
+expect document.querySelectorAll('.lg-stat').length === 5
+expect document.querySelectorAll('svg.chart .bar').length >= 5
+expect document.querySelectorAll('.tbl tbody tr').length >= 5
+expect document.querySelectorAll('.tbl tr.failed').length >= 1
+eval [...document.querySelectorAll('.lg-v')].map(e => e.textContent).join(' | ')
+expect document.documentElement.scrollWidth <= innerWidth
+shot 14-ledger
+logs
+# score view
+eval location.hash = '#score'
+wait 500
+until document.querySelectorAll('.fr').length >= 3 ;; 3000
+expect document.querySelectorAll('.cons-form .field').length >= 1
+eval (() => { document.querySelector('.console select').value = 'preset.list'; document.querySelector('.console select').dispatchEvent(new Event('change')); [...document.querySelectorAll('.console button')].find(b => b.textContent.startsWith('发出')).click(); return 1; })()
+until !!document.querySelector('.cons-ack') ;; 4000
+eval document.querySelector('.cons-ack').textContent
+eval document.querySelectorAll('.console select optgroup option').length
+eval document.querySelector('.fr').click()
+expect !!document.querySelector('.frame-detail pre.json')
+shot 15-score
+# green room system + presets
+eval location.hash = '#greenroom'
+wait 300
+eval [...document.querySelectorAll('.gr-in .seg-b')].find(b => b.textContent.includes('系统')).click()
+until !!document.querySelector('.sys-grid') ;; 4000
+expect document.querySelector('.sys-grid .chip.green') !== null
+shot 16-system
+eval [...document.querySelectorAll('.gr-in .seg-b')].find(b => b.textContent.includes('预设')).click()
+wait 300
+eval (() => { const i = document.querySelector('.preset-grid input'); i.value = 'task'; document.querySelector('.preset-ta').value = '你是一个严谨的工程师。'; [...document.querySelectorAll('.preset-grid button')].find(b => b.textContent.startsWith('写入')).click(); return 1; })()
+until [...document.querySelectorAll('.preset code')].some(c => c.textContent === 'task') ;; 4000
+logs
+# narrow viewport
+size 900 900
+eval location.hash = '#stage'
+wait 600
+expect document.documentElement.scrollWidth <= innerWidth
+expect getComputedStyle(document.querySelector('.mixer')).display === 'none'
+shot 17-narrow
+size 1600 1000
+logs

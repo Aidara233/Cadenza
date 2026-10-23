@@ -1,0 +1,16 @@
+# search tool: the model calls it, the core runs it, the head shows the args and the result
+goto http://127.0.0.1:17994/#stage
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector(".prog-row") ;; 6000
+eval window.__A = [...cadenza.sessions.keys()][0]; window.__row = (id) => [...document.querySelectorAll('.prog-row')].find(b => b.title.startsWith(id)); window.__say = (t) => { const i = document.querySelector('.composer-inp'); i.value = t; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; }; window.__A
+eval window.__row(window.__A).click()
+until !!document.querySelector('.sh-status') && !document.querySelector('.composer').hidden ;; 6000
+eval window.__say('请 search 一下 readme')
+until !!document.querySelector('.toolcall[data-tool="search"]') ;; 10000
+expect /内容/.test(document.querySelector('.toolcall[data-tool="search"] .tc-sum').textContent)
+until document.querySelector('.toolcall[data-tool="search"]').classList.contains('done') ;; 10000
+eval document.querySelector('.toolcall[data-tool="search"] .tc-result').textContent
+expect /README\.md:1: readme/.test(document.querySelector('.toolcall[data-tool="search"] .tc-result').textContent)
+# the context dial's full scale is 1M
+expect /1M/.test(document.querySelector('.gauge-dial')?.title || '')
+shot 29-search

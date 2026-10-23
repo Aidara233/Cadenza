@@ -1,0 +1,11 @@
+# smoke: boot, no provider yet
+goto http://127.0.0.1:17994/#stage
+wait 1500
+logs
+expect document.querySelector('#conn').dataset.state === 'open'
+expect !!document.querySelector('.foyer-title')
+shot 01-foyer
+eval document.querySelector('[data-view=greenroom].view-tab').click()
+wait 800
+shot 02-greenroom-empty
+logs

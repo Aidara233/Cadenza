@@ -1,0 +1,35 @@
+# web tools: greenroom config -> network axis -> a real (mocked) search round-trip, then a refusal
+goto http://127.0.0.1:17994/#greenroom
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector('.gr-in') ;; 8000
+eval [...document.querySelectorAll('.seg-b')].find(b => b.textContent.includes('联网')).click()
+until !!document.querySelector('.net-save') ;; 4000
+eval (() => { document.querySelector('.net-enabled').checked = true; document.querySelector('.net-key').value = 'tvly-test'; document.querySelector('.net-endpoint').value = 'http://127.0.0.1:15799/search'; document.querySelector('.net-results').value = '3'; return 1; })()
+eval document.querySelector('.net-save').click()
+until [...document.querySelectorAll('.toast')].some(t => t.textContent.includes('已保存')) ;; 6000
+eval document.querySelector('.net-test').click()
+until !!document.querySelector('.net-result .pt-r') ;; 12000
+expect !!document.querySelector('.net-result .pt-r.ok')
+shot 30-network-config
+goto http://127.0.0.1:17994/#stage
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector('.prog-row') ;; 8000
+eval window.__A = [...cadenza.sessions.keys()][0]; window.__row = (id) => [...document.querySelectorAll('.prog-row')].find(b => b.title.startsWith(id)); window.__say = (t) => { const i = document.querySelector('.composer-inp'); i.value = t; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; }; window.__A
+eval window.__row(window.__A).click()
+until !!document.querySelector('.ax-network') ;; 8000
+eval [...document.querySelectorAll('.ax-network .seg-b')].find(b => b.textContent.trim() === 'all').click()
+until document.querySelector('.ax-network .ax-val').textContent === 'all' ;; 4000
+eval window.__say('请联网查一下')
+until !!document.querySelector('.toolcall[data-tool="web_search"]') ;; 12000
+until document.querySelector('.toolcall[data-tool="web_search"]').classList.contains('done') ;; 12000
+expect /README 示例/.test(document.querySelector('.toolcall[data-tool="web_search"] .tc-result').textContent)
+until !window.__row(window.__A).classList.contains('st-run') ;; 10000
+shot 31-web-search
+eval [...document.querySelectorAll('.ax-network .seg-b')].find(b => b.textContent.trim() === 'off').click()
+until document.querySelector('.ax-network .ax-val').textContent === 'off' ;; 4000
+eval window.__say('再联网一次')
+until [...document.querySelectorAll('.toolcall[data-tool="web_search"]')].length >= 2 ;; 12000
+until [...document.querySelectorAll('.toolcall[data-tool="web_search"]')].at(-1).classList.contains('done') ;; 12000
+expect /联网轴/.test([...document.querySelectorAll('.toolcall[data-tool="web_search"]')].at(-1).querySelector('.tc-result').textContent)
+shot 32-web-refused
+logs

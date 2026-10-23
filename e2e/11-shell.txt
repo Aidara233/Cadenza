@@ -1,0 +1,65 @@
+# shell: greenroom config -> permission axis -> a real (shared) shell round-trip,
+# and the hard stop below `trusted` (shell is Destructive, same tier as delete)
+goto http://127.0.0.1:17994/#greenroom
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector('.gr-in') ;; 8000
+eval [...document.querySelectorAll('.seg-b')].find(b => b.textContent.includes('Shell')).click()
+until !!document.querySelector('.shell-save') ;; 4000
+expect !!document.querySelector('.shell-enabled').checked
+eval document.querySelector('.shell-test').click()
+until !!document.querySelector('.shell-result .pt-r') ;; 20000
+expect !!document.querySelector('.shell-result .pt-r.ok')
+shot 40-shell-config
+
+goto http://127.0.0.1:17994/#stage
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector('.prog-row') ;; 8000
+
+;; ⚠️ **两个会话**，各测一半；绝不往正在跑的会话里再发一条。
+;; 那个「再发一条」的形状里塞了三个互相独立的竞态（确认框的创建时机、轴命令的回执、排队的排空），
+;; 而它们都不是本脚本要证明的东西。档位切换走**命令通道**——与调音台确认之后发的**同一条命令**；
+;; 确认框那一路由 `3-asks-axes` / `6-mixer-fit` 覆盖。
+eval window.__row = (id) => [...document.querySelectorAll('.prog-row')].find(b => b.title.startsWith(id)); window.__say = (t) => { const i = document.querySelector('.composer-inp'); i.value = t; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; }; window.__mk = async (title, tier) => { const a = await cadenza.core.command({ kind: 'session.create', title }); if (tier) await cadenza.core.command({ kind: 'session.setAxis', sessionId: a.sessionId, axis: 'permission', value: tier }); return a.sessionId; }; 1
+
+;; ---- ① 默认档位（standard）：调用被拒，进程根本不起 ----
+eval (async () => { window.__A = await window.__mk('shell 拒绝', null); return window.__A; })()
+until !!window.__row(window.__A) ;; 6000
+eval window.__row(window.__A).click()
+;; ⚠️ 只等调音台**画出来**——档位本身由下面那条拒绝理由**逐字**证（`权限＝standard`），
+;; 比等 UI 上的 `.ax-val` 更硬，也不受「状态还没载入时那一格是 —」的影响。
+until !!document.querySelector('.ax-permission .seg-b') ;; 8000
+eval window.__say('请跑命令看看')
+until !!document.querySelector('.toolcall[data-tool="shell"]') ;; 12000
+until document.querySelector('.toolcall[data-tool="shell"]').classList.contains('done') ;; 12000
+expect /拒绝/.test(document.querySelector('.toolcall[data-tool="shell"] .tc-result').textContent)
+expect /standard/.test(document.querySelector('.toolcall[data-tool="shell"] .tc-result').textContent)
+expect !/mock-shell-ok/.test(document.querySelector('.toolcall[data-tool="shell"] .tc-result').textContent)
+shot 41-shell-refused
+
+;; ---- ② trusted：直接放行，真的跑出结果 ----
+eval (async () => { window.__B = await window.__mk('shell 运行', 'trusted'); return window.__B; })()
+until !!window.__row(window.__B) ;; 6000
+eval window.__row(window.__B).click()
+until !!document.querySelector('.ax-permission .seg-b') ;; 8000
+eval window.__say('请跑命令看看')
+until !!document.querySelector('.toolcall[data-tool="shell"]') ;; 12000
+until document.querySelector('.toolcall[data-tool="shell"]').classList.contains('done') ;; 12000
+expect /mock-shell-ok/.test(document.querySelector('.toolcall[data-tool="shell"] .tc-result').textContent)
+until !window.__row(window.__B).classList.contains('st-run') ;; 10000
+shot 42-shell-ran
+
+;; ---- ③ 中断：命令跑不完（`shell-finished.txt` 不该出现在盘上，见 README 的手工核对）----
+;; ⚠️ 发之前先等会话**空闲**：往一个正在跑的会话里发是「排队」，而排队的排空是另一条路径。
+until !window.__row(window.__B).classList.contains('st-run') ;; 4000
+eval window.__say('长命令')
+until window.__row(window.__B).classList.contains('st-run') ;; 12000
+wait 1200
+eval document.querySelector('.composer-stop').click()
+until !!document.querySelector('.note-interrupt') ;; 8000
+wait 5000
+expect !window.__row(window.__B).classList.contains('st-run')
+shot 43-shell-interrupted
+
+;; Put the session back so later scripts (if run after this one) start from the default tier.
+eval (async () => (await cadenza.core.command({ kind: 'session.setAxis', sessionId: window.__B, axis: 'permission', value: 'standard' })).accepted)()
+logs

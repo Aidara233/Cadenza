@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Cadenza · Lilara</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23161310'/%3E%3Cpath d='M8 9h16M8 13h16M8 17h16M8 21h16M8 25h16' stroke='%23574b3c' stroke-width='1'/%3E%3Cellipse cx='14' cy='21' rx='3.6' ry='2.6' transform='rotate(-20 14 21)' fill='%23e0ad4f'/%3E%3Cpath d='M17.2 20V7.5' stroke='%23e0ad4f' stroke-width='1.6'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/base.css">
+<link rel="stylesheet" href="css/shell.css">
+<link rel="stylesheet" href="css/stage.css">
+<link rel="stylesheet" href="css/views.css">
+</head>
+<body>
+<a class="skip" href="#main">跳到主内容</a>
+
+<header class="topbar">
+  <div class="brand" aria-label="Cadenza">
+    <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+      <path d="M3 9h26M3 13h26M3 17h26M3 21h26M3 25h26" class="brand-staff"/>
+      <ellipse cx="13" cy="21" rx="3.8" ry="2.7" transform="rotate(-20 13 21)" class="brand-note"/>
+      <path d="M16.4 20V6.5c3 .6 5 2.4 6 5" class="brand-stem"/>
+    </svg>
+    <span class="brand-word">Cadenza</span>
+    <span class="brand-sub">for Lilara</span>
+  </div>
+
+  <nav class="views" aria-label="视图">
+    <button class="view-tab" data-view="stage" aria-keyshortcuts="Alt+1"><span class="vt-roman">I</span>舞台</button>
+    <button class="view-tab" data-view="score" aria-keyshortcuts="Alt+2"><span class="vt-roman">II</span>总谱</button>
+    <button class="view-tab" data-view="ledger" aria-keyshortcuts="Alt+3"><span class="vt-roman">III</span>账簿</button>
+    <button class="view-tab" data-view="greenroom" aria-keyshortcuts="Alt+4"><span class="vt-roman">IV</span>后台</button>
+  </nav>
+
+  <div class="staff-wrap" title="实时事件谱：每个事件是一个音符">
+    <canvas id="staff" aria-hidden="true"></canvas>
+    <span class="staff-tempo" id="tempo">♩ = 0</span>
+  </div>
+
+  <div class="top-right">
+    <button class="cue-btn" id="cue-btn" aria-haspopup="dialog" hidden>
+      <span class="cue-fermata" aria-hidden="true">𝄐</span><span id="cue-count">0</span> 等你
+    </button>
+    <button class="kbd-btn" id="palette-btn" aria-keyshortcuts="Control+K" title="命令面板">
+      <span>搜索与命令</span><kbd>Ctrl</kbd><kbd>K</kbd>
+    </button>
+    <div class="conn" id="conn" role="status" aria-live="polite">
+      <span class="conn-dot" aria-hidden="true"></span><span class="conn-text">连接中</span>
+    </div>
+  </div>
+</header>
+
+<div class="banner" id="banner" role="alert" hidden></div>
+
+<main id="main" tabindex="-1">
+  <section class="view" id="view-stage" data-view="stage"></section>
+  <section class="view" id="view-score" data-view="score" hidden></section>
+  <section class="view" id="view-ledger" data-view="ledger" hidden></section>
+  <section class="view" id="view-greenroom" data-view="greenroom" hidden></section>
+</main>
+
+<footer class="statusbar" id="statusbar"></footer>
+<div id="toasts" aria-live="polite" role="status"></div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+# ⚠️ **只钉行尾，不钉编码。**
+#
+# 为什么不用 `* text=auto eol=lf`：那会把**二进制**文件也当成文本去规范化（本仓库今天
+# 没有二进制，但下一个人扔一张截图进来时，`auto` 会把它悄悄改坏，而 diff 看不出）。
+# ⇒ 默认 `binary`（= 不碰），只给「文本 + 需要在两个平台上都一致」的那些钉 LF：
+#
+# · `serve.sh` / `serve.py` —— 带 shebang、要在 Linux / macOS 上直接执行；
+#   CRLF 会让内核报 `bad interpreter: /usr/bin/env bash^M`，而那条错误**与真因隔了一层**。
+# · `serve-router.php` —— PHP 解析器对 BOM 敏感，行尾也不该随平台变。
+*.sh   text eol=lf
+*.py   text eol=lf
+*.php  text eol=lf
+*.js   text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.cs   text eol=lf
+*.json text eol=lf
+*.ps1  text eol=crlf

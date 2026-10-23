@@ -1,0 +1,78 @@
+# status sync: one row per session, fed by every stream (run after 2-flow)
+goto http://127.0.0.1:17994/#stage
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector(".prog-row") ;; 6000
+eval window.__A = [...cadenza.sessions.keys()][0]; window.__row = (id) => [...document.querySelectorAll('.prog-row')].find(b => b.title.startsWith(id)); window.__say = (t) => { const i = document.querySelector('.composer-inp'); i.value = t; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; }; window.__A
+eval window.__row(window.__A).click()
+until !!document.querySelector('.sh-status') && !document.querySelector('.composer').hidden ;; 6000
+# transient failures: retry.attempt shows live, and collapses into one note
+eval window.__say('flaky please')
+until document.querySelector('.perf').classList.contains('retrying') ;; 6000
+expect /重奏 [12]\/10/.test(document.querySelector('.perf').textContent)
+expect window.__row(window.__A).classList.contains('retrying')
+shot 23-retrying
+until document.querySelector('.perf').hidden ;; 10000
+expect document.querySelectorAll('.note-retry').length === 1
+expect /2 \/ 10/.test(document.querySelector('.note-retry').textContent)
+expect !window.__row(window.__A).classList.contains('retrying') && !window.__row(window.__A).classList.contains('st-run')
+# interrupt during retry backoff: perf, stop button, row and head come to rest together
+eval window.__say('overload now')
+until document.querySelector('.perf').classList.contains('retrying') ;; 6000
+eval document.querySelector('.composer-stop').click()
+until document.querySelector('.perf').hidden ;; 6000
+expect document.querySelector('.composer-stop').hidden
+expect !window.__row(window.__A).classList.contains('st-run') && !window.__row(window.__A).classList.contains('retrying')
+expect !document.querySelector('.sh-status').classList.contains('st-run')
+wait 1500
+expect document.querySelector('.perf').hidden && !window.__row(window.__A).classList.contains('st-run')
+# non-transient failure: only an `error` event (no session.state) — everything must still stop
+eval window.__say('please fail now')
+until document.querySelectorAll('.note-error').length >= 1 ;; 8000
+expect document.querySelector('.perf').hidden && document.querySelector('.composer-stop').hidden
+expect !window.__row(window.__A).classList.contains('st-run') && window.__row(window.__A).classList.contains('errored')
+expect !document.querySelector('.sh-status').classList.contains('st-run')
+wait 1200
+expect !window.__row(window.__A).classList.contains('st-run')
+shot 25-error-rest
+# ask cancelled from the cue: no session.state follows — the row must leave 𝄐 anyway
+eval window.__say('请 ask 我几个问题')
+until !!document.querySelector('.cue.cue-q') ;; 10000
+expect window.__row(window.__A).classList.contains('st-wait') && !document.querySelector('#cue-btn').hidden
+eval [...document.querySelectorAll('.cue-q button')].find(b => b.textContent.includes('作废')).click()
+until !document.querySelector('.cue') ;; 6000
+until !window.__row(window.__A).classList.contains('st-wait') ;; 3000
+wait 1500
+expect !window.__row(window.__A).classList.contains('st-wait') && document.querySelector('#cue-btn').hidden
+expect !document.querySelector('.sh-status').classList.contains('st-wait') && !document.querySelector('.sh-status').classList.contains('st-run')
+# a session that is NOT open: its row follows its own stream, without a reload
+eval (async () => { const a = await cadenza.core.command({ kind: 'session.create', title: '后台乐章' }); window.__B = a.sessionId; return a.accepted + ' ' + a.sessionId; })()
+until !!window.__row(window.__B) ;; 6000
+wait 800
+eval (async () => (await cadenza.core.command({ kind: 'session.send', sessionId: window.__B, blocks: [{ kind: 'text', text: 'slow please' }] })).accepted)()
+until window.__row(window.__B).classList.contains('st-run') ;; 4000
+expect document.querySelector('.perf').hidden && !window.__row(window.__A).classList.contains('st-run')
+shot 24-background-running
+until !window.__row(window.__B).classList.contains('st-run') ;; 12000
+eval (async () => (await cadenza.core.command({ kind: 'session.send', sessionId: window.__B, blocks: [{ kind: 'text', text: 'please fail now' }] })).accepted)()
+until window.__row(window.__B).classList.contains('errored') ;; 6000
+expect !window.__row(window.__B).classList.contains('st-run')
+expect [...document.querySelectorAll('.toast')].some(t => t.textContent.includes('出错了'))
+eval (async () => (await cadenza.core.command({ kind: 'session.send', sessionId: window.__B, blocks: [{ kind: 'text', text: 'overload now' }] })).accepted)()
+until window.__row(window.__B).classList.contains('retrying') ;; 6000
+expect /重奏/.test(window.__row(window.__B).textContent)
+eval (async () => (await cadenza.core.command({ kind: 'session.interrupt', sessionId: window.__B })).accepted)()
+until !window.__row(window.__B).classList.contains('st-run') && !window.__row(window.__B).classList.contains('retrying') ;; 6000
+eval (async () => (await cadenza.core.command({ kind: 'session.send', sessionId: window.__B, blocks: [{ kind: 'text', text: '请 write 一个文件' }] })).accepted)()
+until window.__row(window.__B).classList.contains('st-wait') && !document.querySelector('#cue-btn').hidden ;; 8000
+eval (async () => { const a = [...cadenza.approvals.values()].find(x => x.sessionId === window.__B); return (await cadenza.core.command({ kind: 'approval.respond', sessionId: window.__B, askId: a.askId, outcome: 'cancel' })).accepted; })()
+until !window.__row(window.__B).classList.contains('st-wait') && document.querySelector('#cue-btn').hidden ;; 4000
+wait 1000
+expect /演奏中 0/.test(document.querySelector('#statusbar').textContent)
+logs
+# markdown tables: edge-less delimiter/body rows, and a ruler line under a pipe-looking prose line
+expect (async () => { const md = (await import("./js/md.js")).md; const t1 = md("| a | b |\n---|---\nx | y |"); const t2 = md("| prose |\n-----\nnext"); return /<table>/.test(t1) && (t1.match(/<tr>/g) || []).length === 2 && !/<table>/.test(t2); })()
+eval (() => { const t = document.querySelector('.composer-inp'); t.value = 'give me an edge table'; t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; })()
+until document.querySelectorAll('.md-table tbody tr').length >= 2 ;; 10000
+expect document.querySelectorAll('.blk-err').length === 0
+expect !document.querySelector('.tl-err')
+shot 28-edge-table

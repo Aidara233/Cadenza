@@ -1,0 +1,20 @@
+# reconnect: core is killed externally during "wait", then restarted
+goto http://127.0.0.1:17994/#stage
+until !!document.querySelector(".prog-row") ;; 6000
+eval document.querySelector(".prog-row").click()
+until document.querySelector('#conn').dataset.state === 'open'
+until document.querySelectorAll('.msg').length > 5 ;; 6000
+eval document.querySelectorAll('.msg').length
+until document.querySelector('#conn').dataset.state === 'closed' ;; 20000
+until !document.querySelector('#banner').hidden ;; 2000
+eval document.querySelector('#banner').textContent
+shot 18-down
+until document.querySelector('#conn').dataset.state === 'open' ;; 40000
+until document.querySelector('#banner').hidden ;; 3000
+wait 1500
+eval document.querySelectorAll('.msg').length
+eval (() => { const t = document.querySelector('.composer-inp'); t.value = '重连后你好'; t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; })()
+until [...document.querySelectorAll('.msg.from-user')].some(m => m.textContent.includes('重连后你好')) ;; 6000
+until document.querySelectorAll('.msg.from-model').length >= 6 ;; 10000
+expect new Set([...document.querySelectorAll('.msg')].map(m => m.dataset.key).filter(Boolean)).size === [...document.querySelectorAll('.msg')].filter(m => m.dataset.key).length
+logs

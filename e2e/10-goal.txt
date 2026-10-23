@@ -1,0 +1,35 @@
+# goal mode: auto-continue without user input, finish_goal flips the axis, interrupt truly stops
+goto http://127.0.0.1:17994/#stage
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector('.prog-row') ;; 8000
+eval window.__A = [...cadenza.sessions.keys()][0]; window.__row = (id) => [...document.querySelectorAll('.prog-row')].find(b => b.title.startsWith(id)); window.__say = (t) => { const i = document.querySelector('.composer-inp'); i.value = t; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; }; window.__turn = () => parseInt((document.querySelector('.sh-meta .chip.num')?.textContent || '').match(/\d+/)?.[0] || '0', 10); window.__A
+eval window.__row(window.__A).click()
+until !!document.querySelector('.ax-initiative') ;; 8000
+eval [...document.querySelectorAll('.ax-initiative .seg-b')].find(b => b.textContent.trim() === 'goal').click()
+until document.querySelector('.ax-initiative .ax-val').textContent === 'goal' ;; 4000
+expect !!document.querySelector('.chip.goal')
+eval window.__say('开始长任务')
+# 模型前两次都只是「说完了」，没有任何用户输入——回合数必须自己往前走。
+until window.__turn() >= 2 ;; 15000
+expect window.__row(window.__A).classList.contains('goal')
+shot 33-goal-running
+until window.__turn() >= 4 ;; 25000
+# finish_goal 只是把轴拨回 standard；拨回后还有一回合总结，所以这里等它落定。
+until document.querySelector('.ax-initiative .ax-val').textContent === 'standard' ;; 10000
+expect !document.querySelector('.chip.goal')
+shot 34-goal-finished
+# ---- 用户中断：真停，不自动恢复；目标仍在 ----
+eval [...document.querySelectorAll('.ax-initiative .seg-b')].find(b => b.textContent.trim() === 'goal').click()
+until document.querySelector('.ax-initiative .ax-val').textContent === 'goal' ;; 4000
+eval window.__say('slow please')
+until document.querySelector('.perf') && !document.querySelector('.perf').hidden ;; 10000
+eval document.querySelector('.composer-stop').click()
+until document.querySelector('.perf').hidden ;; 6000
+wait 2500
+expect document.querySelector('.ax-initiative .ax-val').textContent === 'goal'
+expect !window.__row(window.__A).classList.contains('st-run')
+expect !window.__row(window.__A).classList.contains('retrying')
+shot 35-goal-interrupted
+eval [...document.querySelectorAll('.ax-initiative .seg-b')].find(b => b.textContent.trim() === 'standard').click()
+until document.querySelector('.ax-initiative .ax-val').textContent === 'standard' ;; 4000
+logs

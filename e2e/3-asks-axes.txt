@@ -1,0 +1,62 @@
+# continues from s2 state: one session, mock provider
+goto http://127.0.0.1:17994/#stage
+until !!document.querySelector(".prog-row") ;; 6000
+eval document.querySelector(".prog-row").click()
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector('.sh-title') ;; 6000
+# history replay after reload: user msgs + model msgs + tool calls paired
+until document.querySelectorAll('.msg.from-user').length === 3 ;; 6000
+expect document.querySelectorAll('.toolcall.done').length === 2
+expect !!document.querySelector('.tl-origin')
+logs
+# question ask: choice + text + form
+eval (() => { const t = document.querySelector('.composer-inp'); t.value = '请 ask 我几个问题'; t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; })()
+until !!document.querySelector('.cue.cue-q') ;; 10000
+expect document.querySelectorAll('.cue-q .cue-item').length === 3
+expect document.querySelectorAll('.cue-q .opt').length === 3
+shot 08-question
+eval (() => { const c = document.querySelector('.cue-q'); c.querySelectorAll('.opt input')[1].click(); const t = c.querySelector('.cue-text'); t.value = 'Cadenza'; t.dispatchEvent(new Event('input')); const f = c.querySelectorAll('.cue-form input'); f[1].value = '周五'; f[1].dispatchEvent(new Event('input')); c.querySelector('.btn-primary').click(); return 1; })()
+until !document.querySelector('.cue') ;; 6000
+until [...document.querySelectorAll('.tc-name')].some(e => e.textContent === 'ask') && document.querySelectorAll('.msg.from-model').length >= 5 ;; 10000
+eval (async () => { const r = await cadenza.core.get('/sessions/' + cadenza.current + '/history'); const t = r.rendered.filter(x => x.kind === 'toolResult').pop(); return t.blocks.map(b => b.text).join('|'); })()
+logs
+# axes: set permission readonly via the mixer
+eval [...document.querySelectorAll('.ax-permission .seg-b')].find(b => b.textContent === 'readonly').click()
+until document.querySelector('.ax-permission .seg-b.on')?.textContent === 'readonly' ;; 4000
+until [...document.querySelectorAll('.note-axis')].length >= 1 ;; 4000
+# cross-axis alert: safety prod + permission authorized
+eval [...document.querySelectorAll('.ax-safety .seg-b')].find(b => b.textContent === 'prod').click()
+wait 400
+eval [...document.querySelectorAll('.ax-permission .seg-b')].find(b => b.textContent === 'authorized').click()
+until !!document.querySelector('.mix-alert') ;; 4000
+shot 09-axes-alert
+eval [...document.querySelectorAll('.ax-safety .seg-b')].find(b => b.textContent === 'dev').click()
+until !document.querySelector('.mix-alert') ;; 4000
+# temperature fader
+eval (() => { const s = document.querySelector('.ax-temperature .fader'); s.value = '0.3'; s.dispatchEvent(new Event('change')); return 1; })()
+until document.querySelector('.ax-temperature .ax-val')?.textContent === '0.3' ;; 4000
+# model switch via configure (modelId key)
+eval [...document.querySelectorAll('.mix-tab')].find(b => b.textContent === '模型').click()
+wait 300
+eval (() => { const s = document.querySelector('.mx-model'); s.value = 'mock-pro'; return [...document.querySelectorAll('.mix-body button')].find(b => b.textContent === '换调').click(); })()
+until /mock-pro/.test(document.querySelector('.sh-meta').textContent) ;; 5000
+until [...document.querySelectorAll('.note-spec')].length >= 1 ;; 4000
+shot 10-model
+eval [...document.querySelectorAll('.mix-tab')].find(b => b.textContent === '槽位').click()
+wait 300
+expect document.querySelectorAll('.slot').length === 3
+shot 11-slots
+logs
+# upstream failure => error note
+eval (() => { const t = document.querySelector('.composer-inp'); t.value = 'please fail now'; t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; })()
+until !!document.querySelector('.note-error') ;; 10000
+eval document.querySelector('.note-error').textContent
+# slow reply + interrupt
+eval (() => { const t = document.querySelector('.composer-inp'); t.value = 'slow please'; t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; })()
+until !document.querySelector('.perf').hidden ;; 4000
+shot 12-running
+expect !document.querySelector('.composer-stop').hidden
+eval document.querySelector('.composer-stop').click()
+until document.querySelector('.perf').hidden ;; 5000
+until !!document.querySelector('.note-interrupt') ;; 3000
+logs

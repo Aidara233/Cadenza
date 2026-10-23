@@ -1,0 +1,71 @@
+# full flow against isolated core + mock upstream
+goto http://127.0.0.1:17994/#greenroom
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector(".prov-new")
+eval (async () => { for (const r of await (await fetch("http://127.0.0.1:17989/sessions")).json()) await cadenza.core.command({ kind: "session.delete", sessionId: r.sessionId }); for (const p of cadenza.providers) await cadenza.core.command({ kind: "provider.delete", id: p.id }); location.reload(); return "reset"; })()
+wait 1500
+until !!document.querySelector(".prov-new")
+eval document.querySelector('.prov-new').click()
+wait 300
+eval (() => { const f = document.querySelector('dialog form'); const ins = f.querySelectorAll('input'); const set = (el, v) => { el.value = v; el.dispatchEvent(new Event('input')); }; set(ins[0], 'mock'); set(ins[1], 'sk-test'); set(ins[2], 'mock-flash'); set(ins[3], 'http://127.0.0.1:15799'); set(ins[4], 'mock-flash, mock-pro'); f.querySelectorAll('select')[0].value = 'openai-chat'; f.requestSubmit(); return 'ok'; })()
+until document.querySelectorAll('.prov-card:not(.prov-new)').length === 1
+expect document.querySelector('.prov-card h3').textContent === 'mock'
+eval [...document.querySelectorAll('.prov-card button')].find(b => b.textContent === '试音').click()
+until /✓|✗/.test(document.querySelector('.pt-r')?.textContent || '') ;; 15000
+eval document.querySelector('.pt-r').textContent
+shot 03-provider
+logs
+# create session through dialog
+eval location.hash = '#stage'
+wait 400
+eval document.querySelector('.prog-h .btn-primary').click()
+wait 500
+eval (() => { const f = document.querySelector('dialog form.newsess'); const ins = f.querySelectorAll('input'); ins[0].value = '重构登录流程'; return ins[1].value; })()
+eval document.querySelector('dialog form.newsess .row .btn').click()
+until document.querySelectorAll('.dirb-list li').length > 0
+eval document.querySelector('.dirb-cur').textContent + ' | ' + document.querySelectorAll('.dirb-list li').length
+shot 04-newsession
+eval document.querySelector('dialog form.newsess').requestSubmit()
+until !!document.querySelector('.sh-title') && document.querySelector('.sh-title').textContent === '重构登录流程'
+until !!document.querySelector('.tl-empty')
+expect document.querySelectorAll(".prog-row").length === 1
+expect !!document.querySelector('.gauge')
+expect document.querySelectorAll('.ax').length >= 5
+logs
+# plain message
+eval (() => { const t = document.querySelector('.composer-inp'); t.value = '你好，介绍一下自己'; t.dispatchEvent(new Event('input')); t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; })()
+until document.querySelectorAll('.msg.from-user').length === 1
+until document.querySelectorAll('.msg.from-model').length === 1 ;; 10000
+until document.querySelector('.perf').hidden ;; 5000
+expect !!document.querySelector('.from-model .md table')
+expect !!document.querySelector('.from-model .reasoning')
+expect !!document.querySelector('.from-model figure.code') || !!document.querySelector('.from-model code')
+expect document.querySelector('.from-model .md blockquote') !== null
+until document.querySelector('.gauge-num').textContent !== '—' ;; 4000
+eval document.querySelector('.gauge-num').textContent + ' / ' + document.querySelector('.gauge-row').textContent
+shot 05-first-reply
+logs
+# tool call: ls (standard permission => read-only executes)
+eval (() => { const t = document.querySelector('.composer-inp'); t.value = '帮我 ls 一下目录'; t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; })()
+until document.querySelectorAll('.toolcall.done').length === 1 ;; 10000
+until document.querySelectorAll('.msg.from-model').length === 3 ;; 10000
+eval document.querySelector('.toolcall .tc-name').textContent + ' | ' + document.querySelector('.toolcall .tc-state').textContent
+eval document.querySelector('.toolcall').open = true
+shot 06-toolcall
+logs
+# write => permission ask
+eval (() => { const t = document.querySelector('.composer-inp'); t.value = '请 write 一个文件'; t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; })()
+until !!document.querySelector('.cue.cue-perm') ;; 10000
+expect !document.querySelector('#cue-btn').hidden
+expect !!document.querySelector('.cue-verbatim')
+expect document.querySelectorAll('.cue-remember input').length === 3
+expect document.querySelector('.prog-row').classList.contains('st-wait')
+shot 07-perm-ask
+# edit arguments then approve
+eval (() => { const ta = document.querySelector('.cue-verbatim'); ta.value = JSON.stringify({ path: 'cadenza-demo.txt', content: 'edited by cadenza\n' }); ta.dispatchEvent(new Event('input')); return document.querySelector('.vb-status').textContent; })()
+expect !document.querySelector('.cue-modify').hidden
+eval document.querySelector('.cue .btn-ok').click()
+until !document.querySelector('.cue') ;; 6000
+until [...document.querySelectorAll('.toolcall.done .tc-name')].some(e => e.textContent === 'write') ;; 10000
+until document.querySelector('#cue-btn').hidden ;; 4000
+logs

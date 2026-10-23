@@ -1,0 +1,28 @@
+# mixer must never overflow horizontally, on every tab, at every width where it is shown.
+# needs a session (run after 2-flow).
+goto http://127.0.0.1:17994/#stage
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector(".prog-row") ;; 6000
+eval document.querySelector(".prog-row").click()
+until !!document.querySelector('.mix-tabs') ;; 6000
+eval window.__fit = (tab) => { const m = document.querySelector('.mixer'); const mr = m.getBoundingClientRect(); const bad = [...m.querySelectorAll('*')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.right > mr.left + m.clientLeft + m.clientWidth + 0.5; }).map(e => e.tagName.toLowerCase() + '.' + [...e.classList].join('.') + '@' + Math.round(e.getBoundingClientRect().right - mr.right)); return tab + ' w=' + Math.round(mr.width) + ' sw=' + m.scrollWidth + ' cw=' + m.clientWidth + (bad.length ? ' OVER ' + [...new Set(bad)].slice(0, 12).join(' ') : ' ok'); }; 1
+eval window.__all = () => ['行为', '模型', '槽位', '声明'].map(t => { [...document.querySelectorAll('.mix-tab')].find(b => b.textContent === t).click(); return window.__fit(t); }).join('\n')
+expect !/OVER/.test(window.__all())
+eval window.__all()
+shot 20-mixer-1600
+size 1280 900
+wait 400
+expect !/OVER/.test(window.__all())
+eval window.__all()
+size 1100 900
+wait 400
+expect !/OVER/.test(window.__all())
+eval window.__all()
+eval [...document.querySelectorAll('.mix-tab')].find(b => b.textContent === '模型').click()
+expect document.querySelector(".mixer").scrollWidth <= document.querySelector(".mixer").clientWidth
+shot 21-mixer-1100-model
+eval [...document.querySelectorAll('.mix-tab')].find(b => b.textContent === '行为').click()
+expect document.querySelector(".ax-permission .seg").getBoundingClientRect().height > 50
+shot 22-mixer-1100-axes
+size 1600 1000
+logs
