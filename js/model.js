@@ -193,6 +193,9 @@ export function onGlobalEvent(p, topic) {
       if (r) {
         const prev = r.phase;
         touch();
+        // 核心说不在等（Generating / Tools / Idle）⇒ 本地那条 ask 作废：
+        // 中断、拒答、询问被顶替这几条路都不会再补一条 approval.resolved。
+        if (r.ask && p.phase && p.phase !== "Waiting") { dropAsk(r.ask.askId); r.ask = null; }
         if (typeof p.phase === "string") r.phase = p.phase;
         if (typeof p.turn === "number") r.turn = p.turn;
         // 「跑完了、你还没看过」：从有活计落回 Idle，而且不是当前开着的那一场。
@@ -210,7 +213,7 @@ export function onGlobalEvent(p, topic) {
         touch();
         r.status = p.status; r.turn = p.turn;
         if (p.status !== "Running") { r.stepAt = null; r.retry = null; }
-        if (p.status !== "WaitingForInput" && r.ask) dropAsk(r.ask.askId);
+        if (p.status !== "WaitingForInput" && r.ask) { dropAsk(r.ask.askId); r.ask = null; }
         rows = true;
       }
       break;
@@ -230,6 +233,8 @@ export function onGlobalEvent(p, topic) {
         touch();
         r.lastError = { message: p.message, at: Date.now() };
         if (r.status === "Running") r.status = "Idle";
+        // 失败/被杀的步不会再有下文：本地那条 ask 一并撤掉，否则会一直显示「等你」。
+        if (r.ask) { dropAsk(r.ask.askId); r.ask = null; }
         r.stepAt = null; r.retry = null; rows = true;
         scheduleRefresh(400);
       }
@@ -273,18 +278,19 @@ export function markLocal(id, patch) {
 
 export const isRunning = (id) => app.sessions.get(id)?.status === "Running";
 export const statusOf = (id) => { const r = app.sessions.get(id); return !r ? "Idle" : r.ask ? "WaitingForInput" : r.status || "Idle"; };
-/** 给眼睛看的四态：idle 闲置 · waiting 等你 · generating 模型生成 · tools 工具处理 */
+/** 给眼睛看的四态：idle 休止 · waiting 候场 · generating 谱曲 · tools 排练 */
 export const phaseOf = (id) => {
   const r = id ? app.sessions.get(id) : null;
   if (!r) return "idle";
-  if (r.ask) return "waiting";
   // 核心报的是 PascalCase（SessionPhase 常量）；这里只落成界面用的键。
+  // ⚠️ 相位优先于本地 ask：核心说 Idle 就是真的停了，不能再因为一条过期的 ask 显示「等你」。
   const ph = r.phase;
   if (ph === "Generating") return "generating";
   if (ph === "Tools") return "tools";
   if (ph === "Waiting") return "waiting";
   if (ph === "Idle") return "idle";
-  // 旧核心不发 session.phase：退回按 status 猜（不是常态，别在这里长逻辑）。
+  // 旧核心不发 session.phase：才退回 ask / status 猜（不是常态，别在这里长逻辑）。
+  if (r.ask) return "waiting";
   return r.status === "Running" ? "generating" : "idle";
 };
 

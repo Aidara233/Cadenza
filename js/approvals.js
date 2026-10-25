@@ -47,6 +47,17 @@ export function cueCard(a, opts = {}) {
   const body = h("div.cue-body");
   card.append(body);
 
+  // 过期询问：核心在「重启 / 上一步被杀」之后不会主动补一条答复 —— 只有**下一次推进**
+  // 才会收尾（`Recovery.BeforeStep`）。不催的话，这张卡会一直挂着，看起来像会话卡在「等你」。
+  if (a.deadlineAt && new Date(a.deadlineAt) <= new Date()) {
+    card.append(h("div.cue-expired",
+      h("span", "这条询问已经过期（答案不再被采用）：多半是核心重启或上一步被杀留下的。"),
+      h("button.btn.btn-sm", {
+        type: "button",
+        onclick: () => cmd({ kind: "session.start", sessionId: a.sessionId }, { ok: "已推进：核心会先收掉上一次的尾巴" }),
+      }, "推进恢复")));
+  }
+
   if (!a.items || !a.items.length) {
     body.append(h("p.cue-lost", "问题原文取不回来（核心重启过，或模型给的参数解不出）。不编一个问题出来——作废它，让模型重新问。"));
     card.append(h("footer.cue-f",

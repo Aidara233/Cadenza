@@ -48,6 +48,8 @@
 .pr-main { display: grid; min-width: 0; flex: 1; }
 .pr-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; }
 .pr-meta { display: flex; gap: 8px; font-size: 11px; color: var(--paper-4); }
+/* 相位词（谱曲 / 排练 / 候场 / 休止）走衬线斜体，和标题栏、演奏条同一副嗓子 */
+.pr-meta span:first-child { font-family: var(--serif); font-style: italic; letter-spacing: .03em; }
 .st-run .pr-meta span:first-child { color: var(--verdigris); }
 .st-gen .pr-meta span:first-child { color: var(--verdigris); }
 .st-tool .pr-meta span:first-child { color: var(--sky); }
@@ -73,7 +75,7 @@
 .sh-eyebrow { display: flex; gap: 8px; align-items: center; }
 .sh-title { font-size: 26px; font-style: italic; line-height: 1.2; margin: 3px 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sh-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.sh-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; margin-right: 4px; color: var(--paper-3); }
+.sh-status { display: inline-flex; align-items: center; gap: 6px; font: italic 12.5px/1 var(--serif); letter-spacing: .03em; margin-right: 4px; color: var(--paper-3); }
 .sh-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--paper-4); }
 .sh-status.st-run { color: var(--verdigris); }
 .sh-status.st-run .sh-dot { background: var(--verdigris); box-shadow: 0 0 0 3px var(--verdigris-dim); animation: blink 1s steps(2) infinite; }
@@ -220,6 +222,12 @@ pre.out { margin: 0; padding: 10px 12px; max-height: 360px; overflow: auto; back
 .perf .sp { flex: 1; }
 .perf.retrying { background: var(--brass-dim); border-color: rgba(224, 173, 79, .4); color: var(--brass-2); }
 .perf.retrying .perf-eq i { background: var(--brass); animation-duration: 1.2s; }
+/* 工具处理：和节目单同一个蓝（金只留给「等你」） */
+.perf.tools { background: var(--sky-dim); border-color: rgba(127, 179, 232, .35); color: #cfe6ff; }
+.perf.tools .perf-eq i { background: var(--sky); animation-duration: .9s; }
+/* 过期的询问：核心只在「下一次推进」时收尾，不催的话这张卡会一直挂着 */
+.cue-expired { display: flex; align-items: center; gap: 10px; margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--vermilion-dim); border: 1px solid rgba(239, 106, 76, .35); color: #ffc9bd; font-size: 12px; }
+.cue-expired span { flex: 1; line-height: 1.4; }
 .perf-why { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--paper-2); }
 
 .cues { display: grid; gap: 10px; margin: 0 auto; width: min(920px, calc(100% - 56px)); }

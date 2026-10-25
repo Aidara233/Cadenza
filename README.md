@@ -76,11 +76,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Cadenza\serve.ps1
 - **会话状态只有一份**：`model.js` 的 `onGlobalEvent` 是唯一的折叠口，节目单、标题栏、演奏条、
   中断键、等你按钮、状态栏、命令面板都从同一行读。`session.state` / `step.*` / `error` / `retry.attempt`
   只发在会话流上，所以**所有在内存里的会话**都订阅它的会话流，不只是打开的那个。
-- **四态是派生出来的**：协议的 `status` 只有 `Running / WaitingForInput / Idle`，而核心**每步之间都会落回
-  `Idle`**——照它画会一步一闪。所以行上多一层 `phase`：`generating`（模型生成，`step.begin` /
-  模型消息）/ `tools`（工具处理，带 `toolUse` 的消息 / `tool.result.appended`）/
-  `waiting`（`WaitingForInput` / 有询问）/ `idle`（`Idle` 之后安静 1.2 秒才认）。
-  节目单、标题栏、命令面板、顶栏那条谱全读 `phaseOf(id)`，不读 `status`。
+- **四态由核心报、头只显示**：协议的 `status` 只有 `Running / WaitingForInput / Idle`，而 `StateChanged`
+  是磁盘镜像（**每步结束都会发一条**）——照它画会一步一闪。核心另发 `session.phase`
+  （`Generating` 谱曲 / `Tools` 排练 / `Waiting` 候场 / `Idle` 休止，见核心 `Kernel/SessionPhase`）。
+  头这边 `phaseOf(id)` 只把核心的字符串落成界面键；旧核心不发这条时才退回按 `status` 猜。
+  节目单、标题栏、命令面板、演奏条、顶栏那条谱全读 `phaseOf(id)`，不读 `status`。
 - 核心在 `error` 之后、在询问被作废 / 顶替之后**都不发** `session.state`——头据此自己落回休止，
   再拉一次 `/sessions` 对账；对账时比事件旧的快照不覆盖事件。
 - `retry.attempt`：演奏条变成「重奏 N/10」+ 原因 + 倒计时（用核心给的 `delayMs`，不自己算曲线）；

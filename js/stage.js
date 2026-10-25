@@ -1,6 +1,6 @@
 // Cadenza · stage — the session view: programme (sidebar) · score (timeline) · mixer (inspector).
 import { h, $, swap, clear, fmtTime, fmtAgo, fmtTokens, fmtNum, fmtDur, store, toast, confirmDlg, modal, debounce, copy, jsonBlock, baseName } from "./util.js";
-import { app, cmd, titleOf, projectLabel, dirOf, rememberDir, setCurrent, refreshSessions, refreshPresets, refreshProviders, scheduleRefresh, watchSession, unwatchSession, markLocal, isRunning, phaseOf } from "./model.js";
+import { app, cmd, titleOf, projectLabel, dirOf, rememberDir, setCurrent, refreshSessions, refreshPresets, refreshProviders, scheduleRefresh, watchSession, unwatchSession, markLocal, phaseOf } from "./model.js";
 import { Timeline } from "./timeline.js";
 import { cueCard, hydrate } from "./approvals.js";
 import { renderBlock } from "./blocks.js";
@@ -64,10 +64,10 @@ export function mountStage(root) {
 // ---------------- programme (sidebar) ----------------
 // phase（model.js 派生的四态）而不是协议 status：每步之间核心会落回 Idle，照着画会一跳一跳。
 const STATUS = {
-  generating: { cls: "gen", label: "模型生成", glyph: "♩" },
-  tools: { cls: "tool", label: "工具处理", glyph: "𝄀" },
-  waiting: { cls: "wait", label: "等你", glyph: "𝄐" },
-  idle: { cls: "idle", label: "闲置", glyph: "𝄽" },
+  generating: { cls: "gen", label: "谱曲", glyph: "♩" },
+  tools: { cls: "tool", label: "排练", glyph: "𝄀" },
+  waiting: { cls: "wait", label: "候场", glyph: "𝄐" },
+  idle: { cls: "idle", label: "休止", glyph: "𝄽" },
 };
 
 function renderList() {
@@ -447,22 +447,31 @@ let perfKey = "";
 function renderPerf() {
   syncComposer();
   const r = app.sessions.get(app.current) || {};
-  if (!isRunning(app.current)) { clearInterval(S.perfTimer); perfKey = ""; S.perf.hidden = true; return; }
+  // ⚠️ 判据是相位，不是 status：核心每步结束都会发一条 session.state
+  // （值取当时的 State.Status），照它判会让这条提示一步闪一次——那正是「演奏中偶尔消失」。
+  const ph = phaseOf(app.current);
+  const active = ph === "generating" || ph === "tools" || ph === "waiting";
+  if (!active) { clearInterval(S.perfTimer); perfKey = ""; S.perf.hidden = true; return; }
   // Rebuild only when the shape changes, so the timer text does not flicker on every row event.
-  const key = r.retry ? `retry:${r.retry.attempt}` : "run";
+  const key = r.retry ? `retry:${r.retry.attempt}` : ph;
   S.perf.hidden = false;
   S.perf.classList.toggle("retrying", !!r.retry);
+  S.perf.classList.toggle("tools", !r.retry && ph === "tools");
   if (key === perfKey) return;
   perfKey = key;
   clearInterval(S.perfTimer);
   const t = h("span.perf-t.num");
+  const label = r.retry ? `重奏 ${r.retry.attempt}/${r.retry.max}`
+    : ph === "tools" ? "排练"
+      : ph === "waiting" ? "候场"
+        : "谱曲";
   swap(S.perf,
     h("span.perf-eq", { "aria-hidden": "true" }, h("i"), h("i"), h("i"), h("i"), h("i")),
-    h("span.perf-l", r.retry ? `重奏 ${r.retry.attempt}/${r.retry.max}` : "演奏中"),
+    h("span.perf-l", label),
     r.retry ? h("span.perf-why", { title: r.retry.reason }, r.retry.reason) : null,
     t,
     h("span.sp"),
-    h("button.btn.btn-sm.btn-ghost", { type: "button", onclick: () => interrupt() }, "■ 中断"));
+    ph !== "waiting" ? h("button.btn.btn-sm.btn-ghost", { type: "button", onclick: () => interrupt() }, "■ 中断") : null);
   const tick = () => {
     const row = app.sessions.get(app.current) || {};
     if (row.retry) {
@@ -486,9 +495,12 @@ const saveDraft = debounce(() => {
 }, 250);
 
 function syncComposer() {
-  const run = isRunning(app.current);
+  const ph = phaseOf(app.current);
+  const run = ph === "generating" || ph === "tools";
   S.stopBtn.hidden = !run;
-  S.qInfo.textContent = run ? "演奏中发送 = 排进队列，下一步推进" : "";
+  S.qInfo.textContent = run
+    ? (ph === "tools" ? "排练中；发送 = 排进队列" : "谱曲中发送 = 排进队列，下一步推进")
+    : "";
 }
 
 async function send() {
