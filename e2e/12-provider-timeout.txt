@@ -1,0 +1,75 @@
+# provider timeout: GL 的「一次模型调用最多等多久」
+# 卡片摘要（没配显示 (默认)，不是 100）· 表单只收整数 · 留空 = 不发这个键 · 越界由核心拒 ·
+# 真的按这个秒数掐断，且重试附注带上「单次上限」。
+goto http://127.0.0.1:17994/#greenroom
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector('.gr-in') ;; 8000
+eval [...document.querySelectorAll('.seg-b')].find(b => b.textContent.includes('提供商')).click()
+until !!document.querySelector('.prov-card:not(.prov-new)') ;; 8000
+eval window.__card = () => [...document.querySelectorAll('.prov-card:not(.prov-new)')].find(c => c.querySelector('h3').textContent === 'mock'); window.__kv = (k) => [...(window.__card()?.querySelectorAll('.kv-row') || [])].find(r => r.querySelector('.kv-k').textContent === k)?.querySelector('.kv-v').textContent; window.__open = () => [...window.__card().querySelectorAll('button')].find(b => b.textContent === '编辑').click(); window.__form = () => document.querySelector('dialog form'); window.__t = () => window.__form().querySelector('input[aria-label="调用超时（秒）"]'); window.__set = (v) => { window.__open(); const t = window.__t(); t.value = v; t.dispatchEvent(new Event('input')); window.__form().requestSubmit(); return v; }; window.__cancel = () => document.querySelector('dialog .dlg-actions .btn-ghost').click(); 1
+
+# ① 没配 ⇒ (默认)。⚠️ 不能是 100 —— 那会显示一个用户从没配过的数字。
+expect window.__kv('调用超时') === '(默认)'
+
+# ② 填 600 ⇒ 保存后卡片显示 600 秒
+eval window.__set('600')
+until !document.querySelector('dialog') ;; 6000
+until window.__kv('调用超时') === '600 秒' ;; 6000
+shot 50-timeout-card
+
+# ③ 非整数在前端就拦下：对话框不关、红字说明、命令没发出去（值仍是 600）
+eval window.__set('1.5')
+until !!document.querySelector('dialog .form-err') && document.querySelector('dialog .form-err').textContent.length > 0 ;; 4000
+expect /整数/.test(document.querySelector('dialog .form-err').textContent)
+expect !!document.querySelector('dialog')
+eval window.__cancel()
+wait 300
+expect window.__kv('调用超时') === '600 秒'
+
+# ④ 清空 ⇒ **这个键不发**（= 保留旧值）⇒ 盘上仍是 600，卡片回到 600 秒（不是 (默认)）
+eval window.__set('')
+until !document.querySelector('dialog') ;; 6000
+expect window.__kv('调用超时') === '600 秒'
+
+# ⑤ 0 越界 ⇒ 核心拒，reason 原样显示，盘上没变
+eval window.__set('0')
+until !!document.querySelector('dialog .form-err') ;; 4000
+expect /--timeout/.test(document.querySelector('dialog .form-err').textContent)
+eval window.__cancel()
+wait 300
+expect window.__kv('调用超时') === '600 秒'
+
+# ⑥ 调到 2 秒，去会话里让慢上游（mock 拖 6 秒）真的被掐断
+eval window.__set('2')
+until !document.querySelector('dialog') ;; 6000
+until window.__kv('调用超时') === '2 秒' ;; 6000
+
+goto http://127.0.0.1:17994/#stage
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector('.prog-row') ;; 8000
+eval window.__A = [...cadenza.sessions.keys()][0]; window.__row = (id) => [...document.querySelectorAll('.prog-row')].find(b => b.title.startsWith(id)); window.__say = (t) => { const i = document.querySelector('.composer-inp'); i.value = t; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; }; window.__A
+eval window.__row(window.__A).click()
+until !!document.querySelector('.ax-initiative .seg-b') ;; 8000
+until !window.__row(window.__A).classList.contains('st-run') ;; 5000
+eval window.__say('slow please')
+# 2 秒就该被掐断一次 ⇒ retry.attempt 到来；附注里带上这一格的当前值。
+until !!document.querySelector('.note-retry') ;; 20000
+expect /重奏 1 \/ 10/.test(document.querySelector('.note-retry').textContent)
+expect /单次上限 2 秒/.test(document.querySelector('.note-retry').textContent)
+shot 51-timeout-retry
+# ⑦ 中断：立刻停，且**不**留下「超时」那句（取消不是超时）
+eval document.querySelector('.composer-stop').click()
+wait 2000
+expect !window.__row(window.__A).classList.contains('st-run')
+expect !document.querySelector('.note-error')
+
+# 收尾：留一个宽松的值给后面可能再跑的脚本（核心没有「清回默认」的入口，只能改大）。
+goto http://127.0.0.1:17994/#greenroom
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector('.prov-card:not(.prov-new)') ;; 8000
+eval window.__card = () => [...document.querySelectorAll('.prov-card:not(.prov-new)')].find(c => c.querySelector('h3').textContent === 'mock'); window.__kv = (k) => [...(window.__card()?.querySelectorAll('.kv-row') || [])].find(r => r.querySelector('.kv-k').textContent === k)?.querySelector('.kv-v').textContent; window.__open = () => [...window.__card().querySelectorAll('button')].find(b => b.textContent === '编辑').click(); window.__form = () => document.querySelector('dialog form'); window.__t = () => window.__form().querySelector('input[aria-label="调用超时（秒）"]'); 1
+eval window.__open(); window.__t().value = '600'; window.__t().dispatchEvent(new Event('input')); window.__form().requestSubmit(); 1
+until !document.querySelector('dialog') ;; 6000
+until window.__kv('调用超时') === '600 秒' ;; 6000
+shot 52-timeout-restored
+logs

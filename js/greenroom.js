@@ -46,7 +46,10 @@ function provCard(p) {
       kvr("端点", p.endpoint ? h("code", p.endpoint) : h("span.dim", "官方地址")),
       kvr("认证", p.authScheme ? h("code", p.authScheme) : h("span.dim", "协议默认")),
       kvr("模态", h("code", p.modality || "—")),
-      kvr("可选模型", p.models?.length ? h("span", p.models.join(" · ")) : h("span.dim", "未声明（会话里退回文本框）"))),
+      kvr("可选模型", p.models?.length ? h("span", p.models.join(" · ")) : h("span.dim", "未声明（会话里退回文本框）")),
+      // 一次模型调用的超时。⚠️ 没配时这个键根本不进 /providers（与 endpoint / authScheme 同一族），
+      // 所以不能 `p.timeoutSeconds || 100` —— 那会显示一个用户从没配过的数字。
+      kvr("调用超时", p.timeoutSeconds ? h("span.num", `${p.timeoutSeconds} 秒`) : h("span.dim", "(默认)"))),
     result,
     h("footer.pc-f",
       h("button.btn.btn-sm", { type: "button", onclick: async (e) => {
@@ -78,13 +81,24 @@ function provForm(p) {
   const model = h("input.inp.mono", { value: p?.defaultModel || "", "aria-label": "默认模型" });
   const endpoint = h("input.inp.mono", { value: p?.endpoint || "", placeholder: "留空 = 官方地址", "aria-label": "端点" });
   const models = h("input.inp.mono", { value: (p?.models || []).join(", "), placeholder: "逗号分隔，可空", "aria-label": "可选模型" });
+  // 一次模型调用的超时（秒）。留空 ⇒ **整个键都不发**（= 保留旧值 / 走协议默认）。
+  // ⚠️ 不要用 0 或 null 表达「默认」：0 会被核心拒（越界），null 会被读成「保留」。
+  const timeout = h("input.inp.num.mono", {
+    type: "number", min: "1", step: "1",
+    value: p?.timeoutSeconds ? String(p.timeoutSeconds) : "",
+    placeholder: "留空 = 协议默认（OpenAI 100 秒；Claude 由 SDK 定）",
+    "aria-label": "调用超时（秒）",
+  });
   const err = h("div.form-err", { role: "alert" });
-  const form = h("form",
+  const form = h("form", { novalidate: true },
     h("label.field", h("span", h("b", "id")), id, isNew && sc.providerIdRule ? h("span.hint", sc.providerIdRule) : null),
     h("div.grid2", h("label.field", h("span", "协议"), proto), h("label.field", h("span", "认证方式"), auth)),
     h("label.field", h("span", h("b", "API key"), " · 永远不会回显"), key),
     h("div.grid2", h("label.field", h("span", "默认模型"), model), h("label.field", h("span", "端点"), endpoint)),
     h("label.field", h("span", "可选模型"), models),
+    h("label.field", h("span", "调用超时（秒）"), timeout,
+      // 区间（1..1800）今天不在 /provider-schema 上，所以头不手抄数字——越界由核心的 reason 显示。
+      h("span.hint", "一次模型调用最多等多久（不是一步，也不是询问超时；试音另有固定 10 秒预算）。留空 = 协议默认，清空不会清掉已配的值。")),
     err,
     h("div.dlg-actions", h("button.btn.btn-ghost", { type: "button", onclick: () => m.close() }, "取消"), h("button.btn.btn-primary", { type: "submit" }, isNew ? "加入乐团" : "保存")));
   const m = modal(isNew ? "新提供商" : "编辑 " + p.id, form);
@@ -99,6 +113,16 @@ function provForm(p) {
     if (isNew ? endpoint.value.trim() : endpoint.value.trim() !== (p.endpoint || "")) payload.endpoint = endpoint.value.trim();
     const ml = models.value.split(",").map((s) => s.trim()).filter(Boolean);
     if (isNew ? ml.length : ml.join(",") !== (p.models || []).join(",")) payload.models = ml;
+    // ⚠️ 先在头里把「不是整数」拦住：核心把非数字读成「没给」⇒ 静默保留旧值并回 ✓，用户以为改了。
+    // `type=number` 下用户敲 `30s` 时 .value 是空串，原始文本只落在 validity.badInput 上——
+    // 所以「值是空」与「用户什么都没写」在这里必须分开看。
+    if (timeout.validity.badInput) { err.textContent = "调用超时要是整数秒（留空 = 用协议默认）。"; return; }
+    const tRaw = timeout.value.trim();
+    if (tRaw !== "") {
+      const seconds = Number(tRaw);
+      if (!Number.isInteger(seconds)) { err.textContent = "调用超时要是整数秒（留空 = 用协议默认）。"; return; }
+      if (isNew || seconds !== p.timeoutSeconds) payload.timeoutSeconds = seconds;
+    }
     const ack = await app.core.command(payload);
     if (!ack.accepted) { err.textContent = ack.reason; return; }
     m.close();
