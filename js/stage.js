@@ -1,6 +1,6 @@
 // Cadenza · stage — the session view: programme (sidebar) · score (timeline) · mixer (inspector).
 import { h, $, swap, clear, fmtTime, fmtAgo, fmtTokens, fmtNum, fmtDur, store, toast, confirmDlg, modal, debounce, copy, jsonBlock, baseName } from "./util.js";
-import { app, cmd, titleOf, projectLabel, dirOf, rememberDir, setCurrent, refreshSessions, refreshPresets, scheduleRefresh, watchSession, unwatchSession, markLocal, isRunning, statusOf } from "./model.js";
+import { app, cmd, titleOf, projectLabel, dirOf, rememberDir, setCurrent, refreshSessions, refreshPresets, refreshProviders, scheduleRefresh, watchSession, unwatchSession, markLocal, isRunning, phaseOf } from "./model.js";
 import { Timeline } from "./timeline.js";
 import { cueCard, hydrate } from "./approvals.js";
 import { renderBlock } from "./blocks.js";
@@ -62,10 +62,12 @@ export function mountStage(root) {
 }
 
 // ---------------- programme (sidebar) ----------------
+// phase（model.js 派生的四态）而不是协议 status：每步之间核心会落回 Idle，照着画会一跳一跳。
 const STATUS = {
-  Running: { cls: "run", label: "演奏中", glyph: "♪" },
-  WaitingForInput: { cls: "wait", label: "等你", glyph: "𝄐" },
-  Idle: { cls: "idle", label: "休止", glyph: "𝄽" },
+  generating: { cls: "gen", label: "模型生成", glyph: "♩" },
+  tools: { cls: "tool", label: "工具处理", glyph: "𝄀" },
+  waiting: { cls: "wait", label: "等你", glyph: "𝄐" },
+  idle: { cls: "idle", label: "闲置", glyph: "𝄽" },
 };
 
 function renderList() {
@@ -79,15 +81,18 @@ function renderList() {
   const f = S.filter;
   const frag = document.createDocumentFragment();
   let shown = 0;
+  let groupsShown = 0;
   const pks = [...groups.keys()].sort((a, b) => (a === app.homePk ? -1 : b === app.homePk ? 1 : projectLabel(a).localeCompare(projectLabel(b))));
   for (const pk of pks) {
     let rows = groups.get(pk);
     if (!S.showArchived) rows = rows.filter((r) => !S.archived.has(r.sessionId) || r.sessionId === app.current);
     if (f) rows = rows.filter((r) => (r.title || "").toLowerCase().includes(f) || r.sessionId.includes(f) || projectLabel(pk).toLowerCase().includes(f));
-    if (!rows.length && (f || !groups.get(pk).length)) continue;
+    // Nothing left to show means no header either: a workspace whose sessions are all archived
+    // (and whose archived session is not the one currently open) disappears with its rows.
+    if (!rows.length) continue;
     const open = !S.collapsed.has(pk) || f;
     const waits = rows.filter((r) => r.ask).length;
-    const runs = rows.filter((r) => r.status === "Running").length;
+    const runs = rows.filter((r) => { const ph = phaseOf(r.sessionId); return ph === "generating" || ph === "tools"; }).length;
     const head = h("button.prog-proj", {
       type: "button", "aria-expanded": String(!!open), title: dirOf(pk) || pk,
       onclick: () => { S.collapsed.has(pk) ? S.collapsed.delete(pk) : S.collapsed.add(pk); store.set("collapsedProjects", [...S.collapsed]); renderList(); },
@@ -101,10 +106,12 @@ function renderList() {
     const ul = h("ul.prog-sessions", { role: "group" });
     if (open) for (const r of rows) { ul.append(sessionRow(r)); shown++; }
     frag.append(h("div.prog-group", head, open ? ul : null));
+    groupsShown++;
   }
   if (!app.sessions.size) {
     frag.append(h("div.empty.prog-empty", h("div.glyph", "𝄞"), h("div", "还没有会话"), h("button.btn.btn-sm", { type: "button", onclick: () => newSessionDialog() }, "开始第一首")));
-  } else if (!shown && f) frag.append(h("div.dim.prog-none", "没有匹配「" + f + "」的会话"));
+  } else if (!groupsShown && f) frag.append(h("div.dim.prog-none", "没有匹配「" + f + "」的会话"));
+  else if (!groupsShown) frag.append(h("div.dim.prog-none", "所有会话都已归档 · 勾选下方「显示已归档」查看"));
   swap(S.list, frag);
 }
 
@@ -115,7 +122,7 @@ export function markArchived(id, on) {
 export const isArchived = (id) => S.archived.has(id);
 
 function sessionRow(r) {
-  const st = STATUS[statusOf(r.sessionId)] || STATUS.Idle;
+  const st = STATUS[phaseOf(r.sessionId)] || STATUS.idle;
   const cur = r.sessionId === app.current;
   const label = r.retry ? `重奏 ${r.retry.attempt}/${r.retry.max}` : st.label;
   const err = !r.retry && st.cls === "idle" && r.lastError;
@@ -215,7 +222,7 @@ function renderIdle() {
       h("button.btn.btn-primary", { type: "button", onclick: () => newSessionDialog() }, "+ 新乐章"),
       h("button.btn", { type: "button", onclick: () => app.bus.emit("palette") }, "搜索与命令 ", h("kbd", "Ctrl"), h("kbd", "K"))),
     waiting.length ? h("div.foyer-sec", h("div.eyebrow", "在等你"), h("div.foyer-cards", ...waiting.map((a) => h("button.foyer-card.wait", { type: "button", onclick: () => setCurrent(a.sessionId) }, h("span", "𝄐"), h("b", titleOf(a.sessionId)), h("small", a.askKind === "permission" ? "授权 · " + (a.toolName || "") : "提问"))))) : null,
-    recent.length ? h("div.foyer-sec", h("div.eyebrow", "最近的乐章"), h("div.foyer-cards", ...recent.map((r) => h("button.foyer-card", { type: "button", onclick: () => setCurrent(r.sessionId) }, h("span", (STATUS[r.status] || STATUS.Idle).glyph), h("b", r.title || "无题 " + r.sessionId.slice(0, 6)), h("small", projectLabel(r.projectKey) + " · 第 " + r.turn + " 小节"))))) : null));
+    recent.length ? h("div.foyer-sec", h("div.eyebrow", "最近的乐章"), h("div.foyer-cards", ...recent.map((r) => h("button.foyer-card", { type: "button", onclick: () => setCurrent(r.sessionId) }, h("span", (STATUS[phaseOf(r.sessionId)] || STATUS.idle).glyph), h("b", r.title || "无题 " + r.sessionId.slice(0, 6)), h("small", projectLabel(r.projectKey) + " · 第 " + r.turn + " 小节"))))) : null));
   mixer.show(null);
 }
 
@@ -230,8 +237,8 @@ function renderHead() {
   if (!id || !snap) return;
   const row = app.sessions.get(id) || {};
   const spec = snap.spec || {};
-  const status = statusOf(id);
-  const st = STATUS[status] || STATUS.Idle;
+  const status = phaseOf(id);
+  const st = STATUS[status] || STATUS.idle;
   const archived = !!spec.archivedAt;
   swap(S.head,
     h("div.sh-main",
@@ -326,9 +333,16 @@ function onEvent(p, topic) {
       break;
     case "retry.attempt": {
       // One note per failing call, rewritten on each attempt — ten retries are not ten lines.
-      const body = ["重奏 ", h("b.num", `${p.attempt} / ${p.maxAttempts}`), " · ", p.reason, h("span.dim", ` · ${(p.delayMs / 1000).toFixed(1)} 秒后再试`)];
-      if (S.retryNote?.isConnected) S.retryNote.querySelector("div").replaceChildren(...body.map((x) => typeof x === "string" ? document.createTextNode(x) : x));
-      else S.retryNote = tl.note("retry", body);
+      // 单次上限来自 /providers 的缓存（会话的 providerId 在 /state 的 spec.model.providerId）：
+      // 这一步会连着失败十来次，唯一能解释「为什么每次都卡在同一个时间点」的就是它。
+      // ⚠️ 没配就不显示——缺键 = 协议默认，头不替核心编一个 100。
+      const cap = providerTimeoutOf();
+      const body = ["重奏 ", h("b.num", `${p.attempt} / ${p.maxAttempts}`), " · ", p.reason,
+        h("span.dim", ` · ${(p.delayMs / 1000).toFixed(1)} 秒后再试`),
+        cap ? h("span.dim", ` · 单次上限 ${cap} 秒`) : null];
+      const nodes = body.filter((x) => x != null).map((x) => typeof x === "string" ? document.createTextNode(x) : x);
+      if (S.retryNote?.isConnected) S.retryNote.querySelector("div").replaceChildren(...nodes);
+      else S.retryNote = tl.note("retry", nodes);
       break;
     }
     case "axis.changed":
@@ -346,11 +360,17 @@ function onEvent(p, topic) {
       tl.note("spec", ["换调 · ", h("code", (p.model?.providerId || "") + " / " + (p.model?.modelId || ""))]);
       renderHead(); mixer.refresh();
       break;
-    case "error":
+    case "error": {
       if (S.retryNote?.isConnected) S.retryNote.classList.add("spent");
       S.retryNote = null;
-      tl.note("error", [h("b", "不和谐音 · "), p.message]);
+      const content = [h("b", "不和谐音 · "), p.message];
+      // 认得出「模型调用超时（N 秒）」时，给一条就地改大的路。判据用稳定片段 + 解析数字，
+      // 不做整句匹配：核心改措辞时这里自然失效（只退化成普通红字），不会乱出按钮。
+      const secs = timeoutOfMessage(p.message);
+      if (secs) content.push(providerTimeoutFix(secs));
+      tl.note("error", content);
       break;
+    }
     case "session.compaction.completed":
       tl.note("compact", ["延长记号 · 上下文已压缩至 ", h("code", p.coveredThroughEventId), p.summaryTokens != null ? `（摘要 ${fmtTokens(p.summaryTokens)} tokens）` : ""]);
       mixer.refresh();
@@ -380,6 +400,34 @@ function onEvent(p, topic) {
 
 function labelOfAxis(name) {
   return S.snap?.axisDefinitions?.find((d) => d.name === name)?.label || app.axes?.axes?.find((d) => d.name === name)?.label || name;
+}
+
+/** 本会话提供商的「调用超时」配置（null = 没配，由协议自己的默认值管）。 */
+function providerTimeoutOf() {
+  const pid = S.snap?.spec?.model?.providerId;
+  const p = pid ? app.providers?.find((x) => x.id === pid) : null;
+  return p?.timeoutSeconds || null;
+}
+
+/** 「模型调用超时（600 秒）」→ 600。只认这个稳定片段，认不出就返回 null。 */
+function timeoutOfMessage(message) {
+  const m = /模型调用超时[（(]\s*(\d+)\s*秒/.exec(String(message || ""));
+  return m ? Number(m[1]) : null;
+}
+
+/** 超时失败的就地改大：把该提供商调到两倍（下一次调用生效，不用重建会话）。 */
+function providerTimeoutFix(seconds) {
+  const pid = S.snap?.spec?.model?.providerId;
+  if (!pid) return null;
+  const next = seconds * 2; // 越界（> 1800）时核心会拒，理由照它的 reason 显示——头不手抄区间
+  const btn = h("button.btn.btn-sm.btn-ghost", { type: "button" }, `把「${pid}」的调用超时调到 ${next} 秒`);
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    const ack = await cmd({ kind: "provider.upsert", id: pid, timeoutSeconds: next },
+      { ok: `已把「${pid}」调到 ${next} 秒 · 下一次调用生效` });
+    if (ack.accepted) refreshProviders(); else btn.disabled = false;
+  });
+  return h("div.mt", btn);
 }
 
 /** Everything on the stage that shows "running / waiting / retrying" redraws from the shared row here. */

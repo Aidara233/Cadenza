@@ -36,12 +36,16 @@
 .prog-row.asleep .pr-glyph { opacity: .55; }
 .pr-glyph { width: 22px; flex: none; text-align: center; font: 17px/1 var(--serif); color: var(--paper-4); }
 .st-run .pr-glyph { color: var(--verdigris); animation: bob 1.1s var(--ease) infinite; }
+.st-gen .pr-glyph { color: var(--verdigris); animation: bob 1.1s var(--ease) infinite; }
+.st-tool .pr-glyph { color: var(--brass-2); }
 .st-wait .pr-glyph { color: var(--brass); }
 @keyframes bob { 50% { transform: translateY(-3px); } }
 .pr-main { display: grid; min-width: 0; flex: 1; }
 .pr-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; }
 .pr-meta { display: flex; gap: 8px; font-size: 11px; color: var(--paper-4); }
 .st-run .pr-meta span:first-child { color: var(--verdigris); }
+.st-gen .pr-meta span:first-child { color: var(--verdigris); }
+.st-tool .pr-meta span:first-child { color: var(--brass-2); }
 .st-wait .pr-meta span:first-child { color: var(--brass); }
 .prog-row.retrying .pr-glyph { color: var(--brass); }
 .prog-row.retrying .pr-meta span:first-child { color: var(--brass-2); }

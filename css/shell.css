@@ -30,9 +30,21 @@ body > .statusbar { grid-row: 4; }
 .vt-roman { font: italic 600 11px/1 var(--serif); color: var(--paper-4); }
 .view-tab[aria-current="page"] .vt-roman { color: var(--brass); }
 
-.staff-wrap { position: relative; flex: 1; min-width: 120px; height: 40px; }
+.staff-wrap { position: relative; flex: 1; min-width: 120px; height: 50px; }
 #staff { width: 100%; height: 100%; display: block; }
 .staff-tempo { position: absolute; right: 2px; top: -1px; font: italic 11px/1 var(--serif); color: var(--paper-4); }
+.staff-snd {
+  position: absolute; right: 0; top: 50%; transform: translateY(-50%);
+  width: 17px; height: 17px; padding: 0; display: grid; place-items: center; cursor: pointer;
+  border: 0; border-radius: 50%; background: transparent; color: var(--paper-4);
+  font: 500 11px/1 var(--serif); transition: color .15s, background .2s;
+}
+.staff-snd:hover { color: var(--paper); background: var(--ink-3); }
+.staff-snd[aria-pressed="true"] { color: var(--brass); }
+.staff-snd[aria-pressed="false"]::after {
+  content: ""; position: absolute; width: 14px; height: 1px; background: currentColor;
+  transform: rotate(-38deg); opacity: .85;
+}
 
 .top-right { display: flex; align-items: center; gap: 10px; flex: none; }
 .kbd-btn {

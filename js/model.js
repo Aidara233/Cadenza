@@ -158,7 +158,12 @@ export function resetSubscriptions() { subscribedProjects = new Set(); subscribe
 /**
  * Every event that changes "is it running / waiting / failed" goes through here, whichever stream it came on.
  * Views never keep their own copy; they read app.sessions and listen to bus "sessions".
- * Row fields: status · turn · ask · stepAt (step start, ms) · retry {attempt,max,reason,until} · lastError {message,at}
+ * Row fields: status · phase · turn · ask · stepAt (step start, ms) · retry {attempt,max,reason,until} · lastError {message,at}
+ *
+ * status 是协议原话（Running / WaitingForInput / Idle），phase 是**核心报的活动相位**：
+ * 核心发 `session.phase`（Generating / Tools / Waiting / Idle，见 `Kernel/SessionPhase`），
+ * 头**只显示、不派生**——模型调用与工具执行的边界只有核心知道，这里推出来的东西
+ * 在核心改判据那天会静默分叉。旧核心不发这条时，才退回按 status 猜一个。
  */
 export function onGlobalEvent(p, topic) {
   const id = p.sessionId;
@@ -177,6 +182,15 @@ export function onGlobalEvent(p, topic) {
       break;
     case "session.step.end":
       if (r) { touch(); r.stepAt = null; r.retry = null; rows = true; }
+      break;
+    case "message.appended":
+    case "tool.result.appended":
+      // 只记账（liveAt 挡快照回写）：相位由核心的 `session.phase` 报，这里不推。
+      if (r) { touch(); rows = true; }
+      break;
+    case "session.phase":
+      // 四态由核心判（Kernel/SessionPhase）。头只把字符串落成小写键，不派生。
+      if (r) { touch(); if (typeof p.phase === "string") r.phase = p.phase; if (typeof p.turn === "number") r.turn = p.turn; rows = true; }
       break;
     case "session.state":
       if (r) {
@@ -246,6 +260,20 @@ export function markLocal(id, patch) {
 
 export const isRunning = (id) => app.sessions.get(id)?.status === "Running";
 export const statusOf = (id) => { const r = app.sessions.get(id); return !r ? "Idle" : r.ask ? "WaitingForInput" : r.status || "Idle"; };
+/** 给眼睛看的四态：idle 闲置 · waiting 等你 · generating 模型生成 · tools 工具处理 */
+export const phaseOf = (id) => {
+  const r = id ? app.sessions.get(id) : null;
+  if (!r) return "idle";
+  if (r.ask) return "waiting";
+  // 核心报的是 PascalCase（SessionPhase 常量）；这里只落成界面用的键。
+  const ph = r.phase;
+  if (ph === "Generating") return "generating";
+  if (ph === "Tools") return "tools";
+  if (ph === "Waiting") return "waiting";
+  if (ph === "Idle") return "idle";
+  // 旧核心不发 session.phase：退回按 status 猜（不是常态，别在这里长逻辑）。
+  return r.status === "Running" ? "generating" : "idle";
+};
 
 function toolNameOf(p) {
   if (p.askKind !== "permission") return "ask";

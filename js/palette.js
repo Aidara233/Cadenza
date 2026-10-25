@@ -1,6 +1,6 @@
 // Cadenza · palette — Ctrl+K. Fuzzy over sessions, views and actions.
 import { h, swap, esc } from "./util.js";
-import { app, titleOf, projectLabel, setCurrent, cmd, statusOf } from "./model.js";
+import { app, titleOf, projectLabel, setCurrent, cmd, phaseOf } from "./model.js";
 
 let dlg = null;
 
@@ -22,7 +22,7 @@ function items() {
       { g: "当前会话", icon: "✎", label: "聚焦输入框", hint: "/", run: () => app.bus.emit("focus-composer") });
   }
   for (const a of app.approvals.values()) out.push({ g: "在等你", icon: "𝄐", label: `${titleOf(a.sessionId)} · ${a.askKind === "permission" ? "授权 " + (a.toolName || "") : "提问"}`, run: () => { setCurrent(a.sessionId); app.bus.emit("goto", "stage"); } });
-  for (const r of app.sessions.values()) out.push({ g: "会话", icon: { Running: "♪", WaitingForInput: "𝄐" }[statusOf(r.sessionId)] || "𝄽", label: (r.title || "无题 " + r.sessionId.slice(0, 6)), hint: projectLabel(r.projectKey), extra: r.sessionId, run: () => { setCurrent(r.sessionId); app.bus.emit("goto", "stage"); } });
+  for (const r of app.sessions.values()) out.push({ g: "会话", icon: { generating: "♩", tools: "𝄀", waiting: "𝄐" }[phaseOf(r.sessionId)] || "𝄽", label: (r.title || "无题 " + r.sessionId.slice(0, 6)), hint: projectLabel(r.projectKey) + " · " + ({ generating: "模型生成", tools: "工具处理", waiting: "等你", idle: "闲置" })[phaseOf(r.sessionId)], extra: r.sessionId, run: () => { setCurrent(r.sessionId); app.bus.emit("goto", "stage"); } });
   return out;
 }
 
