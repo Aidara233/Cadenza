@@ -188,10 +188,23 @@ export function onGlobalEvent(p, topic) {
       // 只记账（liveAt 挡快照回写）：相位由核心的 `session.phase` 报，这里不推。
       if (r) { touch(); rows = true; }
       break;
-    case "session.phase":
+    case "session.phase": {
       // 四态由核心判（Kernel/SessionPhase）。头只把字符串落成小写键，不派生。
-      if (r) { touch(); if (typeof p.phase === "string") r.phase = p.phase; if (typeof p.turn === "number") r.turn = p.turn; rows = true; }
+      if (r) {
+        const prev = r.phase;
+        touch();
+        if (typeof p.phase === "string") r.phase = p.phase;
+        if (typeof p.turn === "number") r.turn = p.turn;
+        // 「跑完了、你还没看过」：从有活计落回 Idle，而且不是当前开着的那一场。
+        // ⚠️ 只由「打开会话」清掉（见 stage.js 的 open）——那是「检查过进度」这个动作本身，
+        //    不是时间到了自动消失：没看过的会话不该自己变暗。
+        if (p.phase === "Idle" && (prev === "Generating" || prev === "Tools") && r.sessionId !== app.current) {
+          r.doneAt = Date.now();
+        }
+        rows = true;
+      }
       break;
+    }
     case "session.state":
       if (r) {
         touch();

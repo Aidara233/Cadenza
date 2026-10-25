@@ -46,6 +46,26 @@ body > .statusbar { grid-row: 4; }
   transform: rotate(-38deg); opacity: .85;
 }
 
+/* 提示音音量面板：挂在 ♪ 上的一块 popover（不是页面——8 个数值、低频调整，
+   而且调的时候要能一边听一边改）。 */
+.tune-panel {
+  position: fixed; z-index: 60; width: 236px; padding: 12px 12px 10px;
+  background: var(--ink-2); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, .5);
+}
+.tune-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.tune-head b { flex: 1; font: 600 12px/1 var(--sans); letter-spacing: .06em; color: var(--paper-2); }
+.tune-on { min-width: 40px; }
+.tune-on.is-off { color: var(--paper-4); }
+.tune-rows { display: grid; gap: 7px; }
+.tune-row { display: grid; grid-template-columns: 34px 1fr 40px; align-items: center; gap: 8px; font-size: 11px; color: var(--paper-3); }
+.tune-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tune-num { text-align: right; font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--paper-4); }
+.tune-sep { height: 1px; background: var(--line-soft); margin: 3px 0; }
+.tune-foot { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.tune-foot .dim { font-size: 10.5px; line-height: 1.35; flex: 1; }
+.slider { width: 100%; accent-color: var(--brass); }
+
 .top-right { display: flex; align-items: center; gap: 10px; flex: none; }
 .kbd-btn {
   display: inline-flex; align-items: center; gap: 4px; height: 30px; padding: 0 8px 0 12px; border-radius: 999px; cursor: pointer;

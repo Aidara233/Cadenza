@@ -1,5 +1,6 @@
 // Cadenza · palette — Ctrl+K. Fuzzy over sessions, views and actions.
 import { h, swap, esc } from "./util.js";
+import { openTuning } from "./tuning.js";
 import { app, titleOf, projectLabel, setCurrent, cmd, phaseOf } from "./model.js";
 
 let dlg = null;
@@ -12,7 +13,8 @@ function items() {
     { g: "视图", icon: "II", label: "总谱 · 线路与命令台", hint: "Alt+2", run: go("score") },
     { g: "视图", icon: "III", label: "账簿 · 用量", hint: "Alt+3", run: go("ledger") },
     { g: "视图", icon: "IV", label: "后台 · 提供商 / 预设 / 系统", hint: "Alt+4", run: go("greenroom") },
-    { g: "动作", icon: "+", label: "新乐章（新建会话）", hint: "Alt+N", run: () => app.bus.emit("new-session") });
+    { g: "动作", icon: "+", label: "新乐章（新建会话）", hint: "Alt+N", run: () => app.bus.emit("new-session") },
+    { g: "动作", icon: "♪", label: "提示音音量…", hint: "主音量 + 每个音", run: () => openTuning() });
   if (app.current) {
     const id = app.current;
     out.push(

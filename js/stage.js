@@ -126,10 +126,12 @@ function sessionRow(r) {
   const cur = r.sessionId === app.current;
   const label = r.retry ? `重奏 ${r.retry.attempt}/${r.retry.max}` : st.label;
   const err = !r.retry && st.cls === "idle" && r.lastError;
+  // 刚跑完、还没打开看过（doneAt 由 model 在 phase 落回 Idle 时打，打开会话时清）
+  const done = !!r.doneAt && !cur && st.cls === "idle";
   return h("li", { role: "treeitem", "aria-selected": String(cur) },
-    h(`button.prog-row.st-${st.cls}${r.retry ? ".retrying" : ""}${err ? ".errored" : ""}${r.goal?.active ? ".goal" : ""}${cur ? ".current" : ""}${S.archived.has(r.sessionId) ? ".archived" : ""}${r.active ? "" : ".asleep"}`, {
+    h(`button.prog-row.st-${st.cls}${r.retry ? ".retrying" : ""}${err ? ".errored" : ""}${done ? ".finished" : ""}${r.goal?.active ? ".goal" : ""}${cur ? ".current" : ""}${S.archived.has(r.sessionId) ? ".archived" : ""}${r.active ? "" : ".asleep"}`, {
       type: "button", onclick: () => setCurrent(r.sessionId),
-      title: `${r.sessionId} · ${label}${r.goal?.active ? " · 目标进行中" : ""}${r.retry ? " · " + r.retry.reason : ""}${err ? " · 上一步失败：" + r.lastError.message : ""}${r.active ? "" : " · 未载入内存"}`,
+      title: `${r.sessionId} · ${label}${done ? " · 刚跑完，还没打开看过" : ""}${r.goal?.active ? " · 目标进行中" : ""}${r.retry ? " · " + r.retry.reason : ""}${err ? " · 上一步失败：" + r.lastError.message : ""}${r.active ? "" : " · 未载入内存"}`,
     },
       h("span.pr-glyph", { "aria-hidden": "true" }, st.glyph),
       h("span.pr-main",
@@ -147,6 +149,9 @@ let openSeq = 0;
 
 async function open(id) {
   const my = ++openSeq;
+  // 打开 = 检查过进度：这一场的「待查看」高亮到此为止（model 不会再替它打回来）
+  const doneRow = id ? app.sessions.get(id) : null;
+  if (doneRow?.doneAt) doneRow.doneAt = 0;
   if (S.topic) { unwatchSession(S.topic.slice(8)); S.topic = null; }
   S.tl?.dispose();
   S.tl = null; S.snap = null;

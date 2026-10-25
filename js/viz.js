@@ -11,7 +11,8 @@
 //
 // 提示音默认关闭（浏览器要手势解锁），点右下角 ♪ 打开；只给大事件配音，底纹永远静音。
 import { app, phaseOf } from "./model.js";
-import { store } from "./util.js";
+import { play, audioLevels, onAudioChange } from "./audio.js";
+import { openTuning } from "./tuning.js";
 
 const SPEED = 36;       // px/s
 const HEAD_PAD = 40;    // 播放头离右边缘
@@ -25,7 +26,7 @@ const INK = {
   red: "#ef6a4c", violet: "#b48ce0", muted: "#93877a", dim: "#6f6457", blue: "#7fb3e8",
 };
 
-const TITLE = "会话行为谱：起步（小点）/ 完成（停下来才算）/ 等你 𝄐 / 出错 ✕ / 应答 / 重试 / 压缩 · 背后淡竖线是网络帧 · 点 ♪ 开关提示音";
+const TITLE = "会话行为谱：起步（小点）/ 完成（停下来才算）/ 等你 𝄐 / 出错 ✕ / 应答 / 重试 / 压缩 · 背后淡竖线是网络帧 · 点 ♪ 调音量";
 
 // ---------------------------------------------------------------- 音符
 // p = 五线谱位置（0 = 最下线，8 = 最上线，单数在间里）。label 只给高信号事件。
@@ -82,8 +83,7 @@ const V = {
   w: 0, h: 0, dpr: 1, raf: 0, timer: 0,
   notes: [], ticks: [], fam: new Map(), slot: new Map(), errAt: new Map(),
   times: [], frameTimes: [], last: null,
-  reduced: false, sound: false,
-  actx: null, cueAt: new Map(), cueAny: -1e9,
+  reduced: false,
 };
 
 export function mountViz(canvas, tempoEl) {
@@ -91,10 +91,10 @@ export function mountViz(canvas, tempoEl) {
   V.wrap = canvas.parentElement;
   V.wrap.title = TITLE;
   V.reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  V.sound = store.get("staffSound", false) === true;
   new ResizeObserver(resize).observe(canvas);
   resize();
   soundButton();
+  onAudioChange(paintSound);
   hover();
 
   app.core.on("frame", (dir, f) => frame(dir, f));
@@ -185,7 +185,7 @@ function note(m, p) {
   if (V.notes.length > MAX_NOTES) V.notes.splice(0, V.notes.length - MAX_NOTES);
   V.times.push(Date.now());
   V.last = { label: m.label || p.kind, kind: p.kind, at: Date.now() };
-  if (m.cue) cue(m.cue);
+  if (m.cue) play(m.cue);
   kick();
 }
 
@@ -209,74 +209,25 @@ function frame(dir, f) {
   kick();
 }
 
-// ---------------------------------------------------------------- 提示音
-function tone(at, freq, dur, { type = "sine", gain = 0.05, glide = 0 } = {}) {
-  const ac = V.actx;
-  if (!ac) return;
-  const o = ac.createOscillator(), g = ac.createGain();
-  o.type = type;
-  o.frequency.setValueAtTime(freq, at);
-  if (glide) o.frequency.exponentialRampToValueAtTime(Math.max(40, freq * glide), at + dur);
-  g.gain.setValueAtTime(0.0001, at);
-  g.gain.exponentialRampToValueAtTime(gain, at + Math.min(0.02, dur / 3));
-  g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
-  o.connect(g).connect(ac.destination);
-  o.start(at);
-  o.stop(at + dur + 0.03);
-}
-
-const CUE = {
-  // 小步的 ticks：很轻的一下，像拨到琴弦边缘，别抢大事件的音
-  step: (t) => tone(t, 587, 0.055, { type: "triangle", gain: 0.016 }),
-  done: (t) => { tone(t, 587, 0.16, { type: "triangle", gain: 0.05 }); tone(t + 0.11, 880, 0.3, { type: "triangle", gain: 0.045 }); },
-  ask: (t) => { tone(t, 880, 0.2, { type: "triangle", gain: 0.06 }); tone(t + 0.14, 1320, 0.55, { type: "triangle", gain: 0.04 }); },
-  answered: (t) => { tone(t, 659, 0.12, { gain: 0.045 }); tone(t + 0.1, 988, 0.22, { gain: 0.035 }); },
-  error: (t) => { tone(t, 214, 0.3, { gain: 0.04, glide: 0.94 }); tone(t, 226, 0.3, { gain: 0.035 }); },
-  retry: (t) => { tone(t, 330, 0.09, { gain: 0.035 }); tone(t + 0.12, 330, 0.09, { gain: 0.035 }); },
-  compact: (t) => tone(t, 990, 0.35, { gain: 0.03, glide: 0.5 }),
-};
-
-function audio() {
-  if (!V.actx) {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) return null;
-    try { V.actx = new AC(); } catch { return null; }
-  }
-  if (V.actx.state === "suspended") V.actx.resume().catch(() => { });
-  return V.actx;
-}
-
-function cue(name) {
-  if (!V.sound) return;
-  const now = performance.now();
-  if (now - (V.cueAt.get(name) || 0) < 600) return;   // 同一种音别叠成一团
-  if (now - V.cueAny < 90) return;                    // 也别和一秒内的另一种挤在一起
-  const ac = audio();
-  if (!ac || !CUE[name]) return;
-  V.cueAt.set(name, now); V.cueAny = now;
-  CUE[name](ac.currentTime + 0.01);
-}
-
 // ---------------------------------------------------------------- 控件
 function soundButton() {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "staff-snd";
-  btn.addEventListener("click", () => {
-    V.sound = !V.sound;
-    store.set("staffSound", V.sound);
-    paintSound();
-    if (V.sound) { audio(); cue("answered"); }   // 打开时自己响一下，确认浏览器肯出声
-  });
+  // 点它打开调音面板（不是切换开关）；aria-pressed 仍表示「声音开着没有」，画面上是一道斜杠
+  btn.setAttribute("aria-haspopup", "dialog");
+  btn.setAttribute("aria-label", "提示音音量");
+  btn.addEventListener("click", (e) => { e.stopPropagation(); openTuning(btn); });
   V.wrap.appendChild(btn);
   V.sndBtn = btn;
   paintSound();
 }
 
 function paintSound() {
-  V.sndBtn.setAttribute("aria-pressed", V.sound ? "true" : "false");
-  V.sndBtn.textContent = "♪";
-  V.sndBtn.title = V.sound ? "提示音：开（点击关闭）" : "提示音：关（点击打开）";
+  const on = audioLevels().on;
+  V.sndBtn.setAttribute("aria-pressed", on ? "true" : "false");
+  V.sndBtn.textContent = "266a";
+  V.sndBtn.title = "提示音：点开调音量（主音量 + 每个音）";
 }
 
 function hover() {
