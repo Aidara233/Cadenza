@@ -1,6 +1,6 @@
 # CADENZA · Lilara 的舞台
 
-> 华彩乐段：乐队停下，独奏者即兴。你指挥，它演奏。
+> 版本 1.0.0 · 华彩乐段：乐队停下，独奏者即兴。你指挥，它演奏。
 
 Cadenza 是 Lilara 核心（`AgentLilaraCode`）的浏览器前端，照 `../09-控制面API参考.md` 实现。
 页面直连核心的 HTTP 快照与一条 WebSocket，不代理、不缓存、不理解业务。

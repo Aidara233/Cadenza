@@ -10,6 +10,7 @@ import { mountViz } from "./viz.js";
 import { openPalette } from "./palette.js";
 
 const VIEWS = ["stage", "score", "ledger", "greenroom"];
+const VERSION = "1.0.0";
 const ON_SHOW = { score: scoreShown, ledger: ledgerShown, greenroom: greenRoomShown };
 
 async function boot() {
@@ -130,6 +131,7 @@ function renderStatus() {
   const active = rows.filter((r) => r.active).length;
   const i = app.core?.info;
   swap(sb,
+    h("span.sb-item", "Cadenza ", h("b", VERSION)),
     h("span.sb-item", "核心 ", h("b", app.core?.base || "—")),
     i ? h("span.sb-item", "v", h("b", i.coreVersion)) : null,
     h("span.sb-item", "会话 ", h("b", fmtNum(rows.length)), " · 在内存 ", h("b", fmtNum(active)), " · 演奏中 ", h("b", fmtNum(running))),
