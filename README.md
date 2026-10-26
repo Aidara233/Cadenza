@@ -2,50 +2,7 @@
 
 > 版本 1.0.0 · 华彩乐段：乐队停下，独奏者即兴。你指挥，它演奏。
 
-Cadenza 是 Lilara 核心（`AgentLilaraCode`）的浏览器前端，照 `../09-控制面API参考.md` 实现。
-页面直连核心的 HTTP 快照与一条 WebSocket，不代理、不缓存、不理解业务。
-
-零依赖、零构建：`index.html` + 原生 ES 模块 + 四份 CSS。没有 npm，没有 CDN，没有联网资源。
-
-## 启动
-
-```bash
-# 1. 起核心（默认 127.0.0.1:17988，WS 默认只放行 http://127.0.0.1:17990）
-#    发布的单文件版（见 AgentLilaraCode/publish）或从源码 dotnet run 都行
-cd E:\Workspace\AgentLilaraCode\src\Lilara.Core && dotnet run -c Debug
-
-# 2. 起 Cadenza（静态宿主，默认 17990，正好是核心白名单）
-#    Windows：
-powershell -NoProfile -ExecutionPolicy Bypass -File Cadenza\serve.ps1
-#    macOS / Linux / WSL / Git Bash：
-./Cadenza/serve.sh
-```
-
-两个脚本是**同一份契约的两个实现**（参数名、默认值、启动自检、报错措辞对齐；改一个必须改另一个）：
-
-| 参数 | `serve.ps1` | `serve.sh` |
-|---|---|---|
-| 端口 | `-Port 17991`（或 `LILARA_HEAD_PORT`） | `--port 17991`（或 `LILARA_HEAD_PORT`） |
-| 核心地址 | `-Core http://…`（或 `LILARA_CORE`） | `--core http://…`（或 `LILARA_CORE`） |
-| 根目录 | `-Root …` | `--root …` |
-| 跳过自检 / 不打开浏览器 | `-NoCheck` / `-NoOpen` | `--no-check` / `--no-open` |
-| 只开浏览器 | — | `--open-only` |
-
-两个脚本都会**自动打开浏览器**（`--no-open` / `-NoOpen` 关掉）；自动化（e2e）就是靠这个开关
-避免在跑测试时弹出窗口。
-
-`serve.sh` **不内置** HTTP 服务器——它按顺序挑这台机器上现成的：
-`php -S`（最推荐，配 `serve-router.php` 关掉缓存）→ `python3`（配 `serve.py`，同样 no-store）
-→ `busybox httpd`（⚠️ 不关缓存）。三个都没有时它会明确说明装哪一个，而不是静默降级。
-
-> ⚠️ 发布的核心单文件**不含前端**：`Cadenza/` 目录要跟着一起分发（它本来就是零构建的静态文件）。
-> 头也可以指到别处的核心（`--core` / 页面 `?core=`），跨机器时注意核心的 WS 白名单只放行
-> `http://127.0.0.1:<头端口>`（`LILARA_ALLOWED_ORIGIN` 可改）。
-
-打开 **`http://127.0.0.1:17990`**（不是 `localhost`——那是另一个 origin，核心会静默拒绝握手；
-页面会拉 `/info.allowedOrigin` 比对，并在顶部横幅说清原因）。
-
-和 Aquarius 用同一个默认端口，两个头同时开要给其中一个换端口。
+Cadenza 是 Lilara 核心（`AgentLilaraCode`）的前端，通过 HTTP 与 Websocket 与核心通信。
 
 ## 四个视图
 
@@ -73,17 +30,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Cadenza\serve.ps1
 - 授权批准发 `answers.decision:"allow"`；改写过参数才带 `answers.arguments`（只换排版的 JSON 不算改写）；`remember` 只发 `"args"` / `"tool"`。
 - 有询问在等时直接发消息会先确认——核心会把那次询问顶替掉（`superseded`）。
 - `GET /sessions` 的 `ask` 判 `ask?.askId`；`title` 缺省；用量里的 `null` 显示 `—`，不当 0 加。
-- **切回会话不重拉历史**：最近 8 个会话的时间线（DOM、分页游标、`seen`）留在内存；切回直接挂回，
-  只从 `lastSeq` 之后补发 WS 事件。缓存另有总消息数预算（2000），超了按最久未用淘汰。
-  核心重启（seq 回退）、`resync_required`、断线重连与会话删除会让缓存失效并重拉。
 - **会话状态只有一份**：`model.js` 的 `onGlobalEvent` 是唯一的折叠口，节目单、标题栏、演奏条、
   中断键、等你按钮、状态栏、命令面板都从同一行读。`session.state` / `step.*` / `error` / `retry.attempt`
   只发在会话流上，所以**所有在内存里的会话**都订阅它的会话流，不只是打开的那个。
-- **四态由核心报、头只显示**：协议的 `status` 只有 `Running / WaitingForInput / Idle`，而 `StateChanged`
-  是磁盘镜像（**每步结束都会发一条**）——照它画会一步一闪。核心另发 `session.phase`
-  （`Generating` 谱曲 / `Tools` 排练 / `Waiting` 候场 / `Idle` 休止，见核心 `Kernel/SessionPhase`）。
-  头这边 `phaseOf(id)` 只把核心的字符串落成界面键；旧核心不发这条时才退回按 `status` 猜。
-  节目单、标题栏、命令面板、演奏条、顶栏那条谱全读 `phaseOf(id)`，不读 `status`。
 - 核心在 `error` 之后、在询问被作废 / 顶替之后**都不发** `session.state`——头据此自己落回休止，
   再拉一次 `/sessions` 对账；对账时比事件旧的快照不覆盖事件。
 - `retry.attempt`：演奏条变成「重奏 N/10」+ 原因 + 倒计时（用核心给的 `delayMs`，不自己算曲线）；
@@ -98,11 +47,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Cadenza\serve.ps1
   `trusted` 才直接放行。后台「Shell」页只管设备级的三件事（总开关 / `sh` 路径 / 超时），
   「这个会话能不能跑命令」永远在调音台的权限轴上。工具卡上是 `❯ shell <第一行命令>`，完整脚本在展开后的参数原文里。
   调音台会直接写出原因，不让人对着「拨了没反应」猜。`web_search` / `web_fetch` 的请求与结果都走普通工具卡。
-- **调用超时住在提供商上**（`/providers` 的 `timeoutSeconds`，缺键 = 没配 = 走协议默认：OpenAI 兼容 100 秒、
-  Claude 由 SDK 定）——头不替核心编一个默认值显示（没配就是「(默认)」，不写 100）。表单只校验**整数**，
-  留空 = 不发这个键；清空不会清回默认（核心没有那个入口），区间 1..1800 不在 `/provider-schema` 上，
-  越界由核心的 `reason` 显示。超时失败（`模型调用超时（N 秒）`）是**瞬态**、会触发十次重试：
-  错误记号里给一个「调到 2N 秒」的按钮，重试附注带上该提供商的「单次上限 N 秒」。
 - **goal 模式**：主动性轴拨到 `goal` 后，模型停回合而目标未收时核心会自动续跑；会话行与标题栏出现
   「⚑ 目标」chip。结束靠模型调 `finish_goal`——它只把轴拨回 `standard`，拨回后还会多跑一步让模型收尾。
   用户点停止是真停（目标仍在，下次发话或「推进」才继续）；不设步数上限。
@@ -174,6 +118,4 @@ Cadenza/
 - 核心没有改名命令，标题只在建会话时起一次。
 - 「工具结果是不是失败」是按结果文本里的关键字猜的（核心不给结构化状态），只影响颜色。
 - 没有鉴权（核心「本机即可信」的设计）；核心只绑 127.0.0.1，静态宿主也只绑 127.0.0.1。
-- **`serve.sh` 只在 Git Bash 上测过**它的分支逻辑（参数、自检、缺服务器提示）；它选中的三个服务器
-  里，`serve.py` 与 `serve-router.php` **没有在 macOS / Linux 上真正跑过一次**（本机两者都没装）。
-  首次在 Linux 上跑时请先看那两行「服务器：…」的输出对不对。
+
