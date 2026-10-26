@@ -1,3 +1,10 @@
+# Cadenza —— 零构建的前端，产物就是仓库里的这些文件
+#
+# ⚠️ `e2e/` **整个都提交**（含 `mock.cs` / `cdp.cs`）：它们是「怎么验证这个头」的唯一记录，
+# 不是临时脚本。它们由 `dotnet run <file>.cs` 直接执行（.NET 10 的 file-based app），
+# 不需要项目文件，也不产生要提交的产物（临时输出落在系统临时目录里）。
+
+# 编辑器 / IDE
 .vs/
 .vscode/
 .idea/
@@ -5,8 +12,13 @@
 *.suo
 *.slnx
 
+# 系统垃圾
 .DS_Store
 Thumbs.db
 
+# 服务端可能留下的日志（serve.sh / serve.ps1 目前都只打到控制台；留一行给将来）
+*.log
+
+# 本目录内的临时 / 冒烟产物（不是系统 /tmp）
 *.tmp
 

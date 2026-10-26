@@ -2,7 +2,50 @@
 
 > 版本 1.0.0 · 华彩乐段：乐队停下，独奏者即兴。你指挥，它演奏。
 
-Cadenza 是 Lilara 核心（`AgentLilaraCode`）的前端，通过 HTTP 与 Websocket 与核心通信。
+Cadenza 是 Lilara 核心（`AgentLilaraCode`）的浏览器前端，照 `../09-控制面API参考.md` 实现。
+页面直连核心的 HTTP 快照与一条 WebSocket，不代理、不缓存、不理解业务。
+
+零依赖、零构建：`index.html` + 原生 ES 模块 + 四份 CSS。没有 npm，没有 CDN，没有联网资源。
+
+## 启动
+
+```bash
+# 1. 起核心（默认 127.0.0.1:17988，WS 默认只放行 http://127.0.0.1:17990）
+#    发布的单文件版（见 AgentLilaraCode/publish）或从源码 dotnet run 都行
+cd E:\Workspace\AgentLilaraCode\src\Lilara.Core && dotnet run -c Debug
+
+# 2. 起 Cadenza（静态宿主，默认 17990，正好是核心白名单）
+#    Windows：
+powershell -NoProfile -ExecutionPolicy Bypass -File Cadenza\serve.ps1
+#    macOS / Linux / WSL / Git Bash：
+./Cadenza/serve.sh
+```
+
+两个脚本是**同一份契约的两个实现**（参数名、默认值、启动自检、报错措辞对齐；改一个必须改另一个）：
+
+| 参数 | `serve.ps1` | `serve.sh` |
+|---|---|---|
+| 端口 | `-Port 17991`（或 `LILARA_HEAD_PORT`） | `--port 17991`（或 `LILARA_HEAD_PORT`） |
+| 核心地址 | `-Core http://…`（或 `LILARA_CORE`） | `--core http://…`（或 `LILARA_CORE`） |
+| 根目录 | `-Root …` | `--root …` |
+| 跳过自检 / 不打开浏览器 | `-NoCheck` / `-NoOpen` | `--no-check` / `--no-open` |
+| 只开浏览器 | — | `--open-only` |
+
+两个脚本都会**自动打开浏览器**（`--no-open` / `-NoOpen` 关掉）；自动化（e2e）就是靠这个开关
+避免在跑测试时弹出窗口。
+
+`serve.sh` **不内置** HTTP 服务器——它按顺序挑这台机器上现成的：
+`php -S`（最推荐，配 `serve-router.php` 关掉缓存）→ `python3`（配 `serve.py`，同样 no-store）
+→ `busybox httpd`（⚠️ 不关缓存）。三个都没有时它会明确说明装哪一个，而不是静默降级。
+
+> ⚠️ 发布的核心单文件**不含前端**：`Cadenza/` 目录要跟着一起分发（它本来就是零构建的静态文件）。
+> 头也可以指到别处的核心（`--core` / 页面 `?core=`），跨机器时注意核心的 WS 白名单只放行
+> `http://127.0.0.1:<头端口>`（`LILARA_ALLOWED_ORIGIN` 可改）。
+
+打开 **`http://127.0.0.1:17990`**（不是 `localhost`——那是另一个 origin，核心会静默拒绝握手；
+页面会拉 `/info.allowedOrigin` 比对，并在顶部横幅说清原因）。
+
+和 Aquarius 用同一个默认端口，两个头同时开要给其中一个换端口。
 
 ## 四个视图
 
@@ -118,4 +161,6 @@ Cadenza/
 - 核心没有改名命令，标题只在建会话时起一次。
 - 「工具结果是不是失败」是按结果文本里的关键字猜的（核心不给结构化状态），只影响颜色。
 - 没有鉴权（核心「本机即可信」的设计）；核心只绑 127.0.0.1，静态宿主也只绑 127.0.0.1。
-
+- **`serve.sh` 只在 Git Bash 上测过**它的分支逻辑（参数、自检、缺服务器提示）；它选中的三个服务器
+  里，`serve.py` 与 `serve-router.php` **没有在 macOS / Linux 上真正跑过一次**（本机两者都没装）。
+  首次在 Linux 上跑时请先看那两行「服务器：…」的输出对不对。
