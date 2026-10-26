@@ -3,7 +3,15 @@ import { h, swap, clear, fmtTime, jsonBlock, copy, toast, store, debounce, confi
 import { app } from "./model.js";
 
 const MAX = 2000;
-const W = { root: null, frames: [], paused: false, filter: "", dir: "all", list: null, detail: null, sel: null, counts: null, pendingRender: false };
+const W = { root: null, frames: [], paused: false, filter: [], dir: "all", list: null, detail: null, sel: null, counts: null, pendingRender: false };
+const FILTER_FIELDS = {
+  kind: (x) => String(kindOf(x) || ""),
+  topic: (x) => String(x.f.topic || ""),
+  dir: (x) => x.dir === "in" ? "in recv 收" : "out send 发",
+  id: (x) => String(x.f.id || ""),
+  session: (x) => String(x.f.payload?.sessionId || x.f.sessionId || ""),
+  seq: (x) => String(x.f.seq ?? ""),
+};
 
 // The 19 wire commands. req = required keys; fields drive the form. Key-name quirks are the core's, kept verbatim.
 export const COMMANDS = [
@@ -19,6 +27,7 @@ export const COMMANDS = [
   { kind: "session.configure", group: "推进", req: ["sessionId"], fields: [["sessionId", "sid"], ["providerId", "s"], ["modelId", "s"], ["askTimeoutMinutes", "n"]], note: "模型键是 modelId（provider.upsert 那边叫 model，是另一个字段）" },
   { kind: "session.gc", group: "上下文", req: ["sessionId"], fields: [["sessionId", "sid"]] },
   { kind: "session.compact", group: "上下文", req: ["sessionId"], fields: [["sessionId", "sid"]] },
+  { kind: "session.plan", group: "上下文", req: ["sessionId", "operation"], fields: [["sessionId", "sid"], ["operation", ["overwrite", "insert", "remove"]], ["nodes", "json"], ["parentId", "s"], ["index", "n"], ["ids", "list"]], note: "计划只存剩余：remove 即推进。与 PUT /sessions/{id}/plan 同一解析器；结构判据在核心，error 原样看note" },
   { kind: "claim.release", group: "上下文", req: ["sessionId", "scope"], fields: [["sessionId", "sid"], ["scope", "list"]] },
   { kind: "approval.respond", group: "审批", req: ["sessionId", "askId", "outcome"], fields: [["sessionId", "sid"], ["askId", "s"], ["outcome", ["submit", "cancel", "modify"]], ["answers", "json"], ["remember", ["", "args", "tool"]]], note: "授权只看 answers.decision（\"allow\" 才批准）" },
   { kind: "preset.set", group: "预设", req: ["id", "content"], fields: [["id", "s"], ["content", "t"]], note: "content 必给；空串合法（= 纯聊天）" },
@@ -27,13 +36,14 @@ export const COMMANDS = [
   { kind: "provider.upsert", group: "提供商", req: ["id"], fields: [["id", "s"], ["apiKey", "s"], ["model", "s"], ["protocol", "s"], ["endpoint", "s"], ["auth", "s"], ["models", "list"]], note: "这里的 model 是 defaultModel" },
   { kind: "provider.delete", group: "提供商", req: ["id"], fields: [["id", "s"]], danger: true },
   { kind: "provider.test", group: "提供商", req: ["id"], fields: [["id", "s"]], note: "同步，最多 10 秒；结果在 note 里" },
+  { kind: "provider.models", group: "提供商", req: ["id"], fields: [["id", "s"]], note: "临时从上游查询模型目录；结果在 ack.data.models，不写配置" },
 ];
 
 export function mountScore(root) {
   W.root = root;
   root.classList.add("scoreview");
-  const search = h("input.inp", { type: "search", placeholder: "过滤：kind / topic / 任意文本", "aria-label": "过滤帧" });
-  search.addEventListener("input", debounce(() => { W.filter = search.value.trim().toLowerCase(); renderList(true); }, 100));
+  const search = h("input.inp", { type: "search", placeholder: "过滤：kind:ack topic:session:* dir:in id:…", "aria-label": "过滤帧", title: "支持 kind:、topic:、dir:、id:、session:、seq:；词之间按 AND 匹配，引号可包含空格" });
+  search.addEventListener("input", debounce(() => { W.filter = parseFilter(search.value); renderList(true); }, 100));
   const dirSel = h("div.seg.seg-sm", { role: "radiogroup", "aria-label": "方向" },
     ...[["all", "全部"], ["in", "收 ←"], ["out", "发 →"]].map(([v, l]) => h(`button.seg-b${v === W.dir ? ".on" : ""}`, { type: "button", role: "radio", "aria-checked": String(v === W.dir), onclick: (e) => { W.dir = v; for (const b of dirSel.children) { b.classList.toggle("on", b === e.currentTarget); b.setAttribute("aria-checked", String(b === e.currentTarget)); } renderList(true); } }, h("span", l))));
   const pause = h("button.btn.btn-sm", { type: "button", "aria-pressed": "false", onclick: () => { W.paused = !W.paused; pause.setAttribute("aria-pressed", String(W.paused)); pause.textContent = W.paused ? "▶ 继续" : "❚❚ 暂停"; if (!W.paused) renderList(true); } }, "❚❚ 暂停");
@@ -59,11 +69,40 @@ function onFrame(dir, f, at) {
 export function scoreShown() { renderList(true); }
 
 function kindOf(f) { return f.kind === "event" ? f.payload?.kind : f.kind === "command" ? f.payload?.kind : f.kind; }
+function parseFilter(value) {
+  const tokens = String(value).match(/(?:[^\s"]+|"[^"]*")+/g) || [];
+  const terms = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    const colon = token.indexOf(":");
+    const key = colon > 0 ? token.slice(0, colon).toLowerCase() : "";
+    let raw = colon > 0 ? token.slice(colon + 1) : token;
+    let val = "";
+    if (raw.startsWith('"')) {
+      raw = raw.slice(1);
+      if (raw.endsWith('"')) raw = raw.slice(0, -1);
+      else {
+        const next = tokens[++i];
+        if (next) raw += " " + next.replace(/"$/g, "");
+      }
+      val = raw;
+    } else val = raw.replace(/"$/g, "");
+    if (val) terms.push({ key: Object.prototype.hasOwnProperty.call(FILTER_FIELDS, key) ? key : "", val: val.toLowerCase() });
+  }
+  return terms;
+}
+
 function match(x) {
   if (W.dir !== "all" && x.dir !== W.dir) return false;
-  if (!W.filter) return true;
-  return JSON.stringify(x.f).toLowerCase().includes(W.filter);
+  if (!W.filter.length) return true;
+  const haystack = JSON.stringify(x.f).toLowerCase();
+  return W.filter.every(({ key, val }) => {
+    const field = key ? FILTER_FIELDS[key](x).toLowerCase() : haystack;
+    return val.includes("*") ? new RegExp("^" + val.split("*").map(escapeRegExp).join(".*") + "$", "i").test(field) : field.includes(val);
+  });
 }
+
+function escapeRegExp(value) { return value.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&"); }
 
 function updateCounts() {
   if (W.counts) W.counts.textContent = `${W.frames.length} 帧 · 收 ${app.core.stats.in} · 发 ${app.core.stats.out}`;
@@ -125,13 +164,14 @@ function consolePanel() {
     h("button.seg-b.on", { type: "button", onclick: () => setMode("form") }, h("span", "表单")),
     h("button.seg-b", { type: "button", onclick: () => setMode("raw") }, h("span", "原始 JSON")));
   const out = h("div.cons-out");
-  const sendBtn = h("button.btn.btn-primary", { type: "button", onclick: () => fire() }, "发出 →");
+  const sendBtn = h("button.btn.btn-primary", { type: "button", onclick: () => fire(), title: "Ctrl+Enter 发送" }, "发出 →");
+  raw.addEventListener("keydown", (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); fire(); } });
   C = { sel, form, raw, mode, out, m: "form" };
   sel.addEventListener("change", () => { store.set("consoleKind", sel.value); buildForm(); });
   buildForm();
   return h("aside.console",
     h("div.wire-h", h("div", h("div.eyebrow", "Conductor's desk"), h("h2", "命令台")), h("span.sp"), mode),
-    h("label.field", h("span", "命令 · ", h("b", "19 条"), " 全覆盖"), sel),
+    h("label.field", h("span", "命令 · ", h("b", `${COMMANDS.length} 条`), " 全覆盖"), sel),
     form, raw, h("div.row-end", sendBtn), out);
 }
 
@@ -148,11 +188,28 @@ function buildForm() {
   clear(C.form);
   C.inputs = {};
   if (def.note) C.form.append(h("p.cons-note", def.note));
+  const presets = {
+    "session.send": { sessionId: app.current || "" },
+    "session.start": { sessionId: app.current || "" },
+    "session.interrupt": { sessionId: app.current || "" },
+    "session.gc": { sessionId: app.current || "" },
+    "session.compact": { sessionId: app.current || "" },
+    "session.plan": { sessionId: app.current || "" },
+    "session.activate": { sessionId: app.current || "" },
+    "session.deactivate": { sessionId: app.current || "" },
+    "session.archive": { sessionId: app.current || "" },
+    "session.delete": { sessionId: app.current || "" },
+    "session.configure": { sessionId: app.current || "" },
+    "session.setAxis": { sessionId: app.current || "" },
+    "approval.respond": { sessionId: app.current || "" },
+  };
+  const preset = presets[def.kind] || {};
   for (const [name, type] of def.fields) {
     let inp;
     const req = def.req?.includes(name) || (name === "text" && def.kind === "session.send");
     if (type === "sid") {
-      inp = h("select.sel", ...[...app.sessions.values()].map((r) => h("option", { value: r.sessionId, selected: r.sessionId === app.current }, `${r.title || "无题"} · ${r.sessionId}`)));
+      const rows = [...app.sessions.values()];
+      inp = h("select.sel", ...(rows.length ? rows.map((r) => h("option", { value: r.sessionId, selected: r.sessionId === (preset[name] || app.current) }, `${r.title || "无题"} · ${r.sessionId}`)) : [h("option", { value: "" }, "（暂无会话）")]));
     } else if (type === "axis") {
       inp = h("select.sel", ...(app.axes?.axes || []).map((a) => h("option", { value: a.name }, `${a.name} · ${a.label}`)));
     } else if (Array.isArray(type)) {
@@ -164,6 +221,7 @@ function buildForm() {
     } else {
       inp = h("input.inp" + (type === "n" ? ".num" : ".mono"), { type: type === "n" ? "number" : "text", placeholder: type === "list" ? "逗号分隔" : "" });
     }
+    if (Object.prototype.hasOwnProperty.call(preset, name) && preset[name] && inp.tagName !== "SELECT") inp.value = preset[name];
     C.inputs[name] = [inp, type];
     C.form.append(h("label.field", h("span", h("code", name), req ? h("b.req", " 必给") : h("span.dim", " 可省")), inp));
   }
@@ -199,7 +257,10 @@ async function fire() {
     try { payload = JSON.parse(C.raw.value); } catch (e) { toast("JSON 解析失败：" + e.message, "err"); return; }
   } else payload = payloadFromForm();
   const def = COMMANDS.find((c) => c.kind === payload.kind);
-  if (def?.danger && !(await confirmDlg({ title: payload.kind, body: "这条命令不可逆。确定发出？", ok: "发出", danger: true }))) return;
+  if (!def) { toast("未知命令：需要有效的 kind", "err"); return; }
+  const missing = (def.req || []).filter((key) => payload[key] == null || payload[key] === "");
+  if (missing.length) { toast("缺少必填字段：" + missing.join(", "), "err"); return; }
+  if (def.danger && !(await confirmDlg({ title: payload.kind, body: "这条命令不可逆。确定发出？", ok: "发出", danger: true }))) return;
   const t0 = performance.now();
   const ack = await app.core.command(payload);
   const ms = Math.round(performance.now() - t0);

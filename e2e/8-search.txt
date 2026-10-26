@@ -11,6 +11,8 @@ expect /内容/.test(document.querySelector('.toolcall[data-tool="search"] .tc-s
 until document.querySelector('.toolcall[data-tool="search"]').classList.contains('done') ;; 10000
 eval document.querySelector('.toolcall[data-tool="search"] .tc-result').textContent
 expect /README\.md:1: readme/.test(document.querySelector('.toolcall[data-tool="search"] .tc-result').textContent)
+# The command table remains available from the console and its count follows the registry
+expect /23 条/.test(document.querySelector('.console').textContent)
 # the context dial's full scale is 1M
 expect /1M/.test(document.querySelector('.gauge-dial')?.title || '')
 shot 29-search

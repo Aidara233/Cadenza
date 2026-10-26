@@ -1,6 +1,7 @@
 // Cadenza · stage — the session view: programme (sidebar) · score (timeline) · mixer (inspector).
 import { h, $, swap, clear, fmtTime, fmtAgo, fmtTokens, fmtNum, fmtDur, store, toast, confirmDlg, modal, debounce, copy, jsonBlock, baseName } from "./util.js";
 import { app, cmd, titleOf, projectLabel, dirOf, rememberDir, setCurrent, refreshSessions, refreshPresets, refreshProviders, scheduleRefresh, watchSession, unwatchSession, markLocal, phaseOf } from "./model.js";
+import { bobDelay, applyBob, onBob } from "./beat.js";
 import { Timeline } from "./timeline.js";
 import { cueCard, hydrate } from "./approvals.js";
 import { renderBlock } from "./blocks.js";
@@ -9,20 +10,25 @@ import { mixer } from "./mixer.js";
 
 const S = {
   root: null,
-  side: null, list: null, filter: "", showArchived: store.get("showArchived", false),
+  side: null, list: null, filter: { terms: [], raw: "" }, showArchived: store.get("showArchived", false),
+  runTimer: 0, runtimeNodes: new Map(),
   head: null, tlRoot: null, cues: null, composer: null, input: null, perf: null,
   mixRoot: null,
-  tl: null, snap: null, topic: null, perfTimer: 0, retryNote: null,
+  tl: null, tlId: null, snap: null, topic: null, perfTimer: 0, retryNote: null,
   archived: new Set(store.get("archived", [])),
   collapsed: new Set(store.get("collapsedProjects", [])),
+  // 子会话的折叠：按父 id 记（父子关系来自 /sessions 快照，本机记住「我收起了谁」）。
+  collapsedParents: new Set(store.get("collapsedParents", [])),
+  // 头部那个子会话面板：按会话记，纯内存——它是「此刻我在看谁的子树」，不是一条偏好。
+  kidsOpen: new Set(),
 };
 
 export function mountStage(root) {
   S.root = root;
   root.classList.add("stage");
   S.list = h("div.prog-list", { role: "tree", "aria-label": "会话" });
-  const search = h("input.inp.prog-search", { type: "search", placeholder: "筛选会话…", "aria-label": "筛选会话" });
-  search.addEventListener("input", debounce(() => { S.filter = search.value.trim().toLowerCase(); renderList(); }, 80));
+  const search = h("input.inp.prog-search", { type: "search", placeholder: "筛选：title:… project:… status:waiting", "aria-label": "筛选会话", title: "支持 title:、id:、project:、status:（running/waiting/idle）；词之间按 AND 匹配，引号可包含空格" });
+  search.addEventListener("input", debounce(() => { S.filter = parseSessionFilter(search.value); renderList(); }, 80));
   const arch = h("label.check.prog-arch", h("input", { type: "checkbox", checked: S.showArchived, onchange: (e) => { S.showArchived = e.target.checked; store.set("showArchived", S.showArchived); renderList(); } }), "显示已归档");
   S.side = h("aside.programme", { "aria-label": "节目单" },
     h("div.prog-h",
@@ -59,16 +65,81 @@ export function mountStage(root) {
   app.core.on("reconnected", () => { if (app.current) reopen(); });
   renderList();
   renderIdle();
+
+  // 节拍：写进 CSS 变量，改的时候重画一次（负延迟会跟着新周期重新对齐）
+  applyBob();
+  onBob(() => renderList());
+  S.runTimer = setInterval(tickRuntime, 1000);
+  tickRuntime();
 }
 
 // ---------------- programme (sidebar) ----------------
+function parseSessionFilter(value) {
+  const tokens = String(value).match(/(?:[^\s"]+|"[^"]*")+/g) || [];
+  const fields = new Set(["title", "id", "project", "status", "parent", "turn"]);
+  const terms = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    const colon = token.indexOf(":");
+    const key = colon > 0 ? token.slice(0, colon).toLowerCase() : "";
+    let raw = colon > 0 ? token.slice(colon + 1) : token;
+    let val;
+    if (raw.startsWith('"')) {
+      raw = raw.slice(1);
+      if (raw.endsWith('"')) raw = raw.slice(0, -1);
+      else {
+        const next = tokens[++i];
+        if (next) raw += " " + next.replace(/"$/g, "");
+      }
+      val = raw;
+    } else val = raw.replace(/"$/g, "");
+    if (val) terms.push({ key: fields.has(key) ? key : "", val: val.toLowerCase() });
+  }
+  return { raw: String(value), terms };
+}
+function escapeFilterRegExp(value) { return value.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&"); }
+
 // phase（model.js 派生的四态）而不是协议 status：每步之间核心会落回 Idle，照着画会一跳一跳。
 const STATUS = {
   generating: { cls: "gen", label: "谱曲", glyph: "♩" },
-  tools: { cls: "tool", label: "排练", glyph: "𝄀" },
+  tools: { cls: "tool", label: "排练", glyph: "♩" },
   waiting: { cls: "wait", label: "候场", glyph: "𝄐" },
   idle: { cls: "idle", label: "休止", glyph: "𝄽" },
 };
+
+// 节目单以稳定 key 协调 DOM；普通状态更新会保留行和行内按钮，避免 hover 目标被移除。
+const rowSig = (r) => [
+  phaseOf(r.sessionId), r.title, r.parentSessionId, app.sessions.get(r.parentSessionId)?.title, r.turn,
+  r.retry ? r.retry.attempt + "/" + r.retry.max + "/" + r.retry.reason : "",
+  r.doneAt || 0, r.lastError ? r.lastError.at : 0, r.active ? 1 : 0,
+  r.goal && r.goal.active ? 1 : 0, S.archived.has(r.sessionId) ? 1 : 0,
+  r.sessionId === app.current ? 1 : 0,
+].join("|");
+
+function rowNode(r, depth = 0, orphan = false, kids = { count: 0, drawable: 0, open: true, waiting: 0, running: 0 }) {
+  const cache = S.rowNodes || (S.rowNodes = new Map());
+  const sig = rowSig(r) + "|" + depth + "|" + (orphan ? 1 : 0) + "|" + kids.count + "|" + kids.drawable + "|" + (kids.open ? 1 : 0) + "|" + kids.waiting + "|" + kids.running + "|" + (S.filter.terms.length ? 1 : 0);
+  let entry = cache.get(r.sessionId);
+  if (!entry) {
+    const li = sessionRow(r, depth, orphan, kids);
+    entry = { li, sig };
+    cache.set(r.sessionId, entry);
+  } else if (entry.sig !== sig) {
+    updateSessionRow(entry.li, r, depth, orphan, kids);
+    entry.sig = sig;
+  }
+  return entry.li;
+}
+
+function syncChildren(parent, desired) {
+  const keep = new Set(desired);
+  for (const node of [...parent.children]) if (!keep.has(node)) node.remove();
+  for (let i = 0; i < desired.length; i++) {
+    const node = desired[i];
+    const at = parent.children[i] || null;
+    if (node !== at) parent.insertBefore(node, at);
+  }
+}
 
 function renderList() {
   if (!S.list) return;
@@ -79,40 +150,157 @@ function renderList() {
     groups.get(r.projectKey).push(r);
   }
   const f = S.filter;
-  const frag = document.createDocumentFragment();
-  let shown = 0;
+  const filtering = f.terms.length > 0;
+  const wantedGroups = [];
   let groupsShown = 0;
   const pks = [...groups.keys()].sort((a, b) => (a === app.homePk ? -1 : b === app.homePk ? 1 : projectLabel(a).localeCompare(projectLabel(b))));
   for (const pk of pks) {
-    let rows = groups.get(pk);
-    if (!S.showArchived) rows = rows.filter((r) => !S.archived.has(r.sessionId) || r.sessionId === app.current);
-    if (f) rows = rows.filter((r) => (r.title || "").toLowerCase().includes(f) || r.sessionId.includes(f) || projectLabel(pk).toLowerCase().includes(f));
+    const allRows = groups.get(pk);
+    const byId = new Map(allRows.map((r) => [r.sessionId, r]));
+    const children = new Map();
+    for (const r of allRows) {
+      const parentId = r.parentSessionId && byId.has(r.parentSessionId) ? r.parentSessionId : null;
+      const list = children.get(parentId) || [];
+      list.push(r);
+      children.set(parentId, list);
+    }
+    const matches = (r) => !f.terms.length || f.terms.every(({ key, val }) => {
+      const ph = phaseOf(r.sessionId);
+      const values = {
+        title: r.title || "", id: r.sessionId, project: projectLabel(pk),
+        status: ph === "waiting" ? "waiting ask" : ph === "generating" || ph === "tools" ? "running active" : "idle",
+        parent: r.parentSessionId || "", turn: String(r.turn ?? ""),
+      };
+      const text = key ? String(values[key] ?? "").toLowerCase() : [r.title, r.sessionId, projectLabel(pk), r.parentSessionId, ph, r.turn].join(" ").toLowerCase();
+      return val.includes("*") ? new RegExp("^" + val.split("*").map(escapeFilterRegExp).join(".*") + "$", "i").test(text) : text.includes(val);
+    });
+    const baseVisible = (r) => (S.showArchived || !S.archived.has(r.sessionId) || r.sessionId === app.current) && matches(r);
+    const included = new Set(allRows.filter(baseVisible).map((r) => r.sessionId));
+    const matching = new Set(allRows.filter(matches).map((r) => r.sessionId));
+    // Search results keep their ancestor chain visible as context, including archived parents.
+    if (filtering) for (const id of matching) {
+      let parent = byId.get(id)?.parentSessionId;
+      while (parent && byId.has(parent)) { included.add(parent); parent = byId.get(parent).parentSessionId; }
+    }
+    const ordered = [];
+    const visited = new Set();
+    // 折叠判据只有一处：筛选时一律展开（把搜到的行藏起来会让筛选看起来坏了），
+    // 当前打开的那一条的祖先链也一律展开（否则打开子会话时它会从列表里凭空消失）。
+    const openChain = new Set();
+    if (app.current && byId.has(app.current)) {
+      let p = byId.get(app.current).parentSessionId;
+      while (p && byId.has(p) && !openChain.has(p)) { openChain.add(p); p = byId.get(p).parentSessionId; }
+    }
+    const expanded = (id) => filtering || openChain.has(id) || !S.collapsedParents.has(id);
+    // 收起的父行：整棵子树不画，但**要标成已归位**——否则下面「孤儿/环」那一遍
+    // 会把它们当成没画过、以顶层身份再冒出来一次。
+    const skipSubtree = (r) => {
+      if (visited.has(r.sessionId)) return;
+      visited.add(r.sessionId);
+      for (const child of children.get(r.sessionId) || []) skipSubtree(child);
+    };
+    // 收起时把子树里「在等你 / 在跑」的条数汇总到父行上：收起不等于失明，
+    // 而那两件事正是收起之后最容易被漏掉的（核心的浮动行里也只有子会话状态）。
+    const hiddenStats = (id) => {
+      let waiting = 0, running = 0;
+      const seen = new Set([id]);
+      const stack = [...(children.get(id) || [])];
+      while (stack.length) {
+        const n = stack.pop();
+        if (seen.has(n.sessionId)) continue;
+        seen.add(n.sessionId);
+        // 归档的不算：它们不会再跑、也不会再问（只可能留下一条过期的 ask）。
+        if (S.archived.has(n.sessionId)) continue;
+        if (n.ask) waiting++;
+        const ph = phaseOf(n.sessionId);
+        if (ph === "generating" || ph === "tools") running++;
+        stack.push(...(children.get(n.sessionId) || []));
+      }
+      return { waiting, running };
+    };
+    const walk = (r, depth, orphan = false) => {
+      if (visited.has(r.sessionId)) return;
+      visited.add(r.sessionId);
+      const show = included.has(r.sessionId);
+      const kids = children.get(r.sessionId) || [];
+      const open = expanded(r.sessionId);
+      if (show) {
+        const hidden = open ? { waiting: 0, running: 0 } : hiddenStats(r.sessionId);
+        // 两个数不是一回事：`count` 是**未归档**的子会话数（用户要的那个数），
+        // `drawable` 是「此刻会被画出来的行数」——勾着「显示已归档」时它更大。
+        // 开关按 `drawable` 出现（有行可收才给开关），数字按 `count` 报（归档的不占名额）。
+        ordered.push({
+          row: r, depth, orphan,
+          kids: {
+            count: kids.filter((k) => !S.archived.has(k.sessionId)).length,
+            drawable: kids.filter((k) => included.has(k.sessionId)).length,
+            open, ...hidden,
+          },
+        });
+      }
+      if (!open) { for (const child of kids) skipSubtree(child); return; }
+      for (const child of kids) walk(child, depth + (show ? 1 : 0));
+    };
+    for (const r of children.get(null) || []) walk(r, 0);
+    // Orphans and malformed cycles remain directly openable as standalone rows.
+    for (const r of allRows) if (!visited.has(r.sessionId)) walk(r, 0, true);
+    for (const item of ordered) {
+      const parentId = item.row.parentSessionId;
+      if (parentId && (!byId.has(parentId) || !ordered.some((x) => x.row.sessionId === parentId))) {
+        item.depth = 0;
+        item.orphan = true;
+      }
+    }
+    // 项目头那三个计数按「这个项目里可见的会话」算，不按「此刻画出来的行」算：
+    // 收起一个父行不该让「♪ 2 个在跑」跟着掉成 0（那正是收起时最需要看见的信息）。
+    const visible = allRows.filter((r) => included.has(r.sessionId));
     // Nothing left to show means no header either: a workspace whose sessions are all archived
     // (and whose archived session is not the one currently open) disappears with its rows.
-    if (!rows.length) continue;
-    const open = !S.collapsed.has(pk) || f;
-    const waits = rows.filter((r) => r.ask).length;
-    const runs = rows.filter((r) => { const ph = phaseOf(r.sessionId); return ph === "generating" || ph === "tools"; }).length;
-    const head = h("button.prog-proj", {
-      type: "button", "aria-expanded": String(!!open), title: dirOf(pk) || pk,
-      onclick: () => { S.collapsed.has(pk) ? S.collapsed.delete(pk) : S.collapsed.add(pk); store.set("collapsedProjects", [...S.collapsed]); renderList(); },
-    },
-      h("span.pp-caret", { "aria-hidden": "true" }, "›"),
-      h("span.pp-name", projectLabel(pk)),
-      pk === app.homePk ? h("span.chip.pp-home", "核心目录") : null,
-      runs ? h("span.pp-badge.run", { title: `${runs} 个在跑` }, "♪" + runs) : null,
-      waits ? h("span.pp-badge.wait", { title: `${waits} 个在等你` }, "𝄐" + waits) : null,
-      h("span.pp-count.num", rows.length));
-    const ul = h("ul.prog-sessions", { role: "group" });
-    if (open) for (const r of rows) { ul.append(sessionRow(r)); shown++; }
-    frag.append(h("div.prog-group", head, open ? ul : null));
+    if (!visible.length) continue;
+    const open = !S.collapsed.has(pk) || !!f;
+    const waits = visible.filter((r) => r.ask).length;
+    const runs = visible.filter((r) => { const ph = phaseOf(r.sessionId); return ph === "generating" || ph === "tools"; }).length;
+    const state = S.groups || (S.groups = new Map());
+    let group = state.get(pk);
+    if (!group) {
+      const head = h("button.prog-proj", { type: "button", onclick: () => {
+        S.collapsed.has(pk) ? S.collapsed.delete(pk) : S.collapsed.add(pk);
+        store.set("collapsedProjects", [...S.collapsed]); renderList();
+      } }, h("span.pp-caret", { "aria-hidden": "true" }, "›"), h("span.pp-name"), h("span.chip.pp-home", "核心目录"), h("span.pp-badge.run"), h("span.pp-badge.wait"), h("span.pp-count.num"));
+      const ul = h("ul.prog-sessions", { role: "group" });
+      group = { el: h("div.prog-group", { dataset: { key: pk } }, head, ul), head, ul };
+      state.set(pk, group);
+    }
+    group.head.setAttribute("aria-expanded", String(!!open));
+    group.head.title = dirOf(pk) || pk;
+    group.head.querySelector(".pp-name").textContent = projectLabel(pk);
+    const home = group.head.querySelector(".pp-home");
+    home.hidden = pk !== app.homePk;
+    const runBadge = group.head.querySelector(".pp-badge.run");
+    runBadge.hidden = !runs; runBadge.title = `${runs} 个在跑`; runBadge.textContent = runs ? "♪" + runs : "";
+    const waitBadge = group.head.querySelector(".pp-badge.wait");
+    waitBadge.hidden = !waits; waitBadge.title = `${waits} 个在等你`; waitBadge.textContent = waits ? "𝄐" + waits : "";
+    group.head.querySelector(".pp-count").textContent = visible.length;
+    group.ul.hidden = !open;
+    if (open) {
+      const desiredRows = ordered.map((item) => rowNode(item.row, item.depth, item.orphan, item.kids));
+      syncChildren(group.ul, desiredRows);
+    }
+    wantedGroups.push(group.el);
     groupsShown++;
   }
   if (!app.sessions.size) {
-    frag.append(h("div.empty.prog-empty", h("div.glyph", "𝄞"), h("div", "还没有会话"), h("button.btn.btn-sm", { type: "button", onclick: () => newSessionDialog() }, "开始第一首")));
-  } else if (!groupsShown && f) frag.append(h("div.dim.prog-none", "没有匹配「" + f + "」的会话"));
-  else if (!groupsShown) frag.append(h("div.dim.prog-none", "所有会话都已归档 · 勾选下方「显示已归档」查看"));
-  swap(S.list, frag);
+    wantedGroups.push(h("div.empty.prog-empty", { dataset: { key: "empty" } }, h("div.glyph", "𝄞"), h("div", "还没有会话"), h("button.btn.btn-sm", { type: "button", onclick: () => newSessionDialog() }, "开始第一首")));
+  } else if (!groupsShown && f) {
+    wantedGroups.push(h("div.dim.prog-none", { dataset: { key: "none" } }, "没有匹配「" + f + "」的会话"));
+  } else if (!groupsShown) {
+    wantedGroups.push(h("div.dim.prog-none", { dataset: { key: "none" } }, "所有会话都已归档 · 勾选下方「显示已归档」查看"));
+  }
+  const liveProjects = new Set(pks);
+  for (const [pk, group] of S.groups || []) if (!liveProjects.has(pk)) { group.el.remove(); S.groups.delete(pk); }
+  for (const [id] of S.rowNodes || []) if (!app.sessions.has(id)) S.rowNodes.delete(id);
+  pruneTimelineCache();
+  syncChildren(S.list, wantedGroups);
 }
 
 export function markArchived(id, on) {
@@ -121,27 +309,145 @@ export function markArchived(id, on) {
 }
 export const isArchived = (id) => S.archived.has(id);
 
-function sessionRow(r) {
+// bobDelay 现在住在 js/beat.js（节拍可调，相位对齐也在那里）
+
+function sessionRow(r, depth = 0, orphan = false, kids = { count: 0, drawable: 0, open: true, waiting: 0, running: 0 }) {
   const st = STATUS[phaseOf(r.sessionId)] || STATUS.idle;
   const cur = r.sessionId === app.current;
   const label = r.retry ? `重奏 ${r.retry.attempt}/${r.retry.max}` : st.label;
   const err = !r.retry && st.cls === "idle" && r.lastError;
   // 刚跑完、还没打开看过（doneAt 由 model 在 phase 落回 Idle 时打，打开会话时清）
   const done = !!r.doneAt && !cur && st.cls === "idle";
-  return h("li", { role: "treeitem", "aria-selected": String(cur) },
-    h(`button.prog-row.st-${st.cls}${r.retry ? ".retrying" : ""}${err ? ".errored" : ""}${done ? ".finished" : ""}${r.goal?.active ? ".goal" : ""}${cur ? ".current" : ""}${S.archived.has(r.sessionId) ? ".archived" : ""}${r.active ? "" : ".asleep"}`, {
+  const runtime = h("span.pr-runtime.num", runtimeText(r));
+  const parent = r.parentSessionId ? app.sessions.get(r.parentSessionId) : null;
+  const relation = parent ? `子会话 · ${titleOf(parent.sessionId)}` : r.parentSessionId ? `父会话 ${r.parentSessionId} 已不在列表` : "顶层会话";
+  orphan = orphan || (!!r.parentSessionId && !parent);
+  // 开关按「有行可收」出现；数字只数**未归档**的（归档的不占名额）。
+  const hasKids = kids.drawable > 0;
+  const kidsWord = kids.count > 0
+    ? `${kids.count} 个子会话`
+    : "子会话都已归档";
+  // 收起之后仍然要看得见的两件事（汇总自子树，判据在 renderList 的 hiddenStats）：
+  const hiddenWait = !kids.open && kids.waiting > 0;
+  const hiddenRun = !kids.open && kids.running > 0;
+  // 折叠开关：它**不是**行按钮的一部分（按钮里再套按钮是非法的），
+  // 所以它是 li 里的兄弟节点，占一格固定宽度（叶子行也留白，同一层的行才对得齐）。
+  const toggle = h("span.pr-toggle", {
+    role: hasKids ? "button" : null,
+    tabindex: hasKids ? "0" : null,
+    "aria-expanded": hasKids ? String(kids.open) : null,
+    "aria-label": hasKids ? `${kids.open ? "收起" : "展开"} ${kidsWord}` : null,
+    title: hasKids ? `${kids.open ? "收起" : "展开"} ${kidsWord}（已归档的不计）` : null,
+    onclick: hasKids ? (e) => { e.stopPropagation(); toggleParent(r.sessionId, kids.open); } : null,
+    onkeydown: hasKids ? (e) => {
+      if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+        e.preventDefault(); e.stopPropagation(); toggleParent(r.sessionId, kids.open);
+      }
+    } : null,
+  },
+    hasKids ? h("span.pr-caret", { "aria-hidden": "true" }, kids.open ? "▾" : "▸") : null,
+    hasKids && kids.count > 0 ? h("span.pr-kids.num", { "aria-hidden": "true" }, String(kids.count)) : null);
+  const li = h("li.prog-li", { role: "treeitem", "aria-selected": String(cur), "aria-level": depth + 1, style: depth ? { "--tree-depth": depth } : null },
+    toggle,
+    h(`button.prog-row.st-${st.cls}${depth ? ".child" : ""}${orphan ? ".orphan" : ""}${r.retry ? ".retrying" : ""}${err ? ".errored" : ""}${done ? ".finished" : ""}${r.goal?.active ? ".goal" : ""}${cur ? ".current" : ""}${S.archived.has(r.sessionId) ? ".archived" : ""}${r.active ? "" : ".asleep"}${hasKids && !kids.open ? ".collapsed" : ""}`, {
       type: "button", onclick: () => setCurrent(r.sessionId),
-      title: `${r.sessionId} · ${label}${done ? " · 刚跑完，还没打开看过" : ""}${r.goal?.active ? " · 目标进行中" : ""}${r.retry ? " · " + r.retry.reason : ""}${err ? " · 上一步失败：" + r.lastError.message : ""}${r.active ? "" : " · 未载入内存"}`,
+      title: `${r.sessionId} · ${relation}${parent ? " · 父 id " + parent.sessionId : ""} · ${label}${hasKids ? ` · ${kidsWord}${kids.open ? "" : `（已收起${kids.waiting ? ` · ${kids.waiting} 个在等你` : ""}${kids.running ? ` · ${kids.running} 个在跑` : ""}）`}` : ""}${done ? " · 刚跑完，还没打开看过" : ""}${r.goal?.active ? " · 目标进行中" : ""}${r.retry ? " · " + r.retry.reason : ""}${err ? " · 上一步失败：" + r.lastError.message : ""}${r.active ? "" : " · 未载入内存"}`,
     },
-      h("span.pr-glyph", { "aria-hidden": "true" }, st.glyph),
+      depth ? h("span.pr-tree", { "aria-hidden": "true" }, "↳") : null,
+      h("span.pr-glyph", { "aria-hidden": "true", style: { animationDelay: bobDelay() } }, st.glyph),
       h("span.pr-main",
         h("span.pr-title", r.title || h("i.dim", "无题 " + r.sessionId.slice(0, 6))),
         h("span.pr-meta",
           h("span", err ? "失败 · 休止" : label),
-          h("span.num", `第 ${r.turn} 小节`),
-          r.goal?.active ? h("span.pr-goal", { title: "主动性轴 = goal：模型停回合会自动续跑" }, "⚑ 目标") : null,
+          runtime,
+          h("span.num.pr-turn", { title: `第 ${r.turn} 小节` }, `第 ${r.turn} 小节`),
+          r.goal?.active ? h("span.pr-goal", { title: "目标进行中", "aria-label": "目标进行中" }, "⚑") : null,
+          hiddenWait ? h("span.pr-kidwait.num", { title: `收起着的子树里有 ${kids.waiting} 个在等你` }, "𝄐" + kids.waiting) : null,
+          hiddenRun ? h("span.pr-kidrun.num", { title: `收起着的子树里有 ${kids.running} 个在跑` }, "♩" + kids.running) : null,
           S.archived.has(r.sessionId) ? h("span", "已归档") : null)),
+      st.cls === "tool" ? h("span.pr-tool", { title: "工具调用中", "aria-hidden": "true" }, "𝄀") : null,
       r.active ? h("span.pr-live", { "aria-label": "已载入", title: "已载入内存" }) : null));
+  (S.runtimeNodes || (S.runtimeNodes = new Map())).set(r.sessionId, runtime);
+  return li;
+}
+
+/** 收起 / 展开一个父行。状态落 localStorage：这是「我习惯怎么看这棵树」，不是会话事实。 */
+export function toggleParent(id, expanded) {
+  if (expanded) S.collapsedParents.add(id); else S.collapsedParents.delete(id);
+  store.set("collapsedParents", [...S.collapsedParents]);
+  renderList();
+}
+
+function updateSessionRow(li, r, depth = 0, orphan = false, kids = { count: 0, drawable: 0, open: true, waiting: 0, running: 0 }) {
+  const fresh = sessionRow(r, depth, orphan, kids);
+  li.setAttribute("aria-selected", fresh.getAttribute("aria-selected"));
+  li.setAttribute("aria-level", fresh.getAttribute("aria-level"));
+  li.style.cssText = fresh.style.cssText;
+  // 折叠开关整只换掉：它的 onclick 闭包捕获了当时的 open 值，改属性改不掉那个闭包。
+  // 它不是 hover 目标（行按钮才是），换掉不会闪。
+  const oldToggle = li.querySelector(".pr-toggle");
+  const newToggle = fresh.querySelector(".pr-toggle");
+  if (oldToggle && newToggle) oldToggle.replaceWith(newToggle);
+  const oldButton = li.querySelector(".prog-row");
+  const newButton = fresh.querySelector(".prog-row");
+  oldButton.className = newButton.className;
+  oldButton.title = newButton.title;
+  oldButton.replaceChildren(...newButton.childNodes);
+  S.runtimeNodes.set(r.sessionId, oldButton.querySelector(".pr-runtime"));
+}
+
+function runtimeText(r, now = Date.now()) {
+  if (r.runSince) return fmtDur((r.runElapsedMs || 0) + Math.max(0, now - r.runSince));
+  return r.runElapsedMs != null ? fmtDur(r.runElapsedMs) : "";
+}
+
+function tickRuntime() {
+  const now = Date.now();
+  for (const [id, node] of S.runtimeNodes || []) {
+    const r = app.sessions.get(id);
+    if (!r) { S.runtimeNodes.delete(id); continue; }
+    const text = runtimeText(r, now);
+    if (node.textContent !== text) node.textContent = text;
+  }
+}
+
+// ---------------- timeline cache ----------------
+// 切回最近看过的会话时直接复用已经渲染好的时间线：DOM、分页游标、seen 集合都还在。
+// 只放内存、最多 4 条；不落盘（历史里可能有敏感内容，且缓存只对本次页面有意义）。
+const tlCache = new Map();     // sessionId -> { tl, at }
+// 条数和总消息数双上限：8 个短会话可以都留着；一个翻过很多页的长会话
+// 也不会因为「只数会话数」把内存吃穿（超预算时仍按最久未用淘汰）。
+const TL_CACHE_MAX = 8;
+const TL_CACHE_MAX_ITEMS = 2000;
+
+function cacheTimeline(id, tl) {
+  if (!id || !tl) return;
+  tlCache.delete(id);
+  tlCache.set(id, { tl, at: Date.now() });
+  while (true) {
+    let size = 0, items = 0;
+    for (const v of tlCache.values()) { size++; items += v.tl.count || 0; }
+    if (size <= TL_CACHE_MAX && items <= TL_CACHE_MAX_ITEMS) break;
+    let victim = null;
+    for (const [k, v] of tlCache) {
+      if (k === app.current) continue;
+      if (!victim || v.at < victim[1].at) victim = [k, v];
+    }
+    if (!victim) break;
+    victim[1].tl.dispose();
+    tlCache.delete(victim[0]);
+  }
+}
+
+function dropTimeline(id) {
+  const hit = tlCache.get(id);
+  if (!hit) return;
+  hit.tl.dispose();
+  tlCache.delete(id);
+}
+
+function pruneTimelineCache() {
+  for (const id of [...tlCache.keys()]) if (!app.sessions.has(id)) dropTimeline(id);
 }
 
 // ---------------- open a session ----------------
@@ -153,8 +459,12 @@ async function open(id) {
   const doneRow = id ? app.sessions.get(id) : null;
   if (doneRow?.doneAt) doneRow.doneAt = 0;
   if (S.topic) { unwatchSession(S.topic.slice(8)); S.topic = null; }
-  S.tl?.dispose();
-  S.tl = null; S.snap = null;
+  // 摘下而非销毁：切回来的会话可直接挂回（缓存满了才真正 dispose）。
+  if (S.tl) {
+    S.tl.detach();
+    cacheTimeline(S.tlId, S.tl);
+  }
+  S.tl = null; S.tlId = null; S.snap = null;
   renderList();
   if (!id) { renderIdle(); return; }
   if (!app.sessions.has(id)) await refreshSessions();
@@ -179,9 +489,28 @@ async function open(id) {
     S.topic = "session:" + id;
     // The snapshot is the freshest truth we have at highWater; seed the shared row from it.
     markLocal(id, { status: snap.state?.status || "Idle", turn: snap.state?.turn ?? 0, ask: snap.ask?.askId ? { askId: snap.ask.askId, kind: snap.ask.kind, deadlineAt: snap.ask.deadlineAt } : null });
-    watchSession(id, snap.highWater);
-    S.tl = new Timeline(id, app.core, S.tlRoot);
-    await S.tl.first();
+    // 缓存命中：挂回旧时间线，只补 lastSeq 之后的事件，不重拉 /history。
+    // lastSeq 未知（旧核心没给 highWater）或比快照还新（核心重启、seq 重来）都不复用。
+    let hit = tlCache.get(id);
+    if (hit && (hit.tl.lastSeq == null || (typeof snap.highWater === "number" && snap.highWater < hit.tl.lastSeq))) {
+      hit.tl.dispose();
+      tlCache.delete(id);
+      hit = null;
+    }
+    if (hit) {
+      // 当前打开的时间线不再同时留在缓存里：它由 S.tl 持有，切走时才入缓存。
+      tlCache.delete(id);
+      S.tl = hit.tl; S.tlId = id;
+      S.tl.onOpenSession = (childId) => setCurrent(childId);
+      S.tl.attach(S.tlRoot);
+      watchSession(id, S.tl.lastSeq);
+    } else {
+      S.tl = new Timeline(id, app.core, S.tlRoot);
+      S.tlId = id;
+      S.tl.onOpenSession = (childId) => setCurrent(childId);
+      watchSession(id, snap.highWater);
+      await S.tl.first();
+    }
     if (my !== openSeq) return;
     if (snap.ask?.askId) seedAskFromState(id, snap.ask);
     renderHead();
@@ -199,7 +528,14 @@ async function open(id) {
   }
 }
 
-function reopen() { const id = app.current; app.current = null; setCurrent(id); }
+/** 强制重拉：resync / 断线重连 / 归档后重开都不能信任缓存。 */
+function reopen() {
+  const id = app.current;
+  dropTimeline(id);
+  if (S.tl) { S.tl.dispose(); S.tl = null; S.tlId = null; }
+  app.current = null;
+  setCurrent(id);
+}
 
 function seedAskFromState(id, ask) {
   const prev = app.approvals.get(ask.askId);
@@ -245,6 +581,15 @@ function renderHead() {
   const status = phaseOf(id);
   const st = STATUS[status] || STATUS.idle;
   const archived = !!spec.archivedAt;
+  // 派生关系（2026-10-26）：父 id 来自 spec（顶层会话这一格会省略），子会话来自 /sessions 快照。
+  // ⚠️ 两格都只**显示**——能不能派生、深度够不够由核心判，这里绝不自己算。
+  const parentId = spec.parentSessionId || "";
+  const parentRow = parentId ? app.sessions.get(parentId) : null;
+  const kids = childrenOf(id);
+  // 头部这个数只数**未归档**的：归档是「这件事结束了」，不该继续占着「我有 N 个孩子在跑」。
+  const liveKids = kids.filter((k) => !S.archived.has(k.sessionId));
+  const kidsWord = liveKids.length > 0 ? `${liveKids.length} 个子会话` : "子会话都已归档";
+  const kidsOpen = S.kidsOpen.has(id);
   swap(S.head,
     h("div.sh-main",
       h("div.sh-eyebrow",
@@ -259,15 +604,121 @@ function renderHead() {
         (snap.goal?.active || row.goal?.active)
           ? h("span.chip.goal", { title: "主动性轴 = goal：模型停回合会自动续跑，直到调用 finish_goal" }, "⚑ 目标进行中")
           : null,
+        parentId
+          ? h("button.chip.sh-rel", {
+              type: "button",
+              title: parentRow ? `打开父会话 ${parentId}` : `父会话 ${parentId} 已不在列表（记录仍是它的子会话）`,
+              onclick: parentRow ? () => setCurrent(parentId) : null,
+            }, "↰ 子会话", h("span.dim", " · "), parentRow ? titleOf(parentId) : h("i.dim", "父会话已不在列表"),
+            spec.depth != null ? h("span.dim", ` · 第 ${spec.depth} 层`) : null)
+          : null,
+        kids.length
+          ? h("button.chip.sh-kids-toggle", {
+              type: "button",
+              "aria-expanded": String(kidsOpen),
+              title: `${kidsOpen ? "收起" : "展开"}子会话列表 · ${kidsWord}${kids.length > liveKids.length ? ` · 另有 ${kids.length - liveKids.length} 个已归档` : ""}`,
+              onclick: () => { kidsOpen ? S.kidsOpen.delete(id) : S.kidsOpen.add(id); renderHead(); },
+            }, "⎇ ", kidsWord, h("span.sh-caret", { "aria-hidden": "true" }, kidsOpen ? "▾" : "▸"))
+          : null,
         spec.systemPromptPreset ? h("span.chip", { title: "系统提示词预设" }, "预设 " + spec.systemPromptPreset) : null,
         archived ? h("span.chip.plum", "已归档 " + fmtAgo(spec.archivedAt)) : null,
         row.active === false ? h("span.chip", { title: "未载入内存" }, "沉睡") : null,
-        spec.workingDirectory ? h("button.chip.sh-cwd", { type: "button", title: "复制工作目录 " + spec.workingDirectory, onclick: () => copy(spec.workingDirectory) }, "⌂ " + baseName(spec.workingDirectory)) : null)),
+        spec.workingDirectory ? h("button.chip.sh-cwd", { type: "button", title: "复制工作目录 " + spec.workingDirectory, onclick: () => copy(spec.workingDirectory) }, "⌂ " + baseName(spec.workingDirectory)) : null),
+      kidsOpen && kids.length ? kidsPanel(id, kids) : null),
     h("div.sh-actions",
       h("button.btn.btn-sm", { type: "button", title: "推进一步（队列空也推，崩在步中后收回会话用）", onclick: () => cmd({ kind: "session.start", sessionId: id }) }, "▶ 推进"),
       h("button.btn.btn-sm", { type: "button", title: "把此前的上下文压成摘要检查点", onclick: () => compact() }, "𝄐 压缩"),
       h("button.btn.btn-sm.btn-ghost", { type: "button", title: "开一次回收窗口", onclick: () => cmd({ kind: "session.gc", sessionId: id }) }, "𝄒 回收"),
       h("button.icon-btn", { type: "button", "aria-label": "更多操作", title: "更多", onclick: (e) => moreMenu(e.currentTarget) }, "⋯")));
+}
+
+/** 头部那个子会话面板：每行是**快照里的一个会话**，不是核心替我们算出来的摘要。 */
+function kidsPanel(id, kids) {
+  const live = kids.filter((k) => !S.archived.has(k.sessionId));
+  return h("div.sh-kidpanel", { role: "group", "aria-label": `子会话（${kids.length}）` },
+    h("div.sh-kidlist", kids.map((k) => kidRow(k))),
+    h("div.sh-kidfoot",
+      h("span.dim", live.length === kids.length ? `共 ${kids.length} 个` : `${live.length} 个未归档 · 共 ${kids.length} 个`),
+      h("span.sp"),
+      live.length
+        ? h("button.btn.btn-sm", { type: "button", title: "把它们逐个归档（核心先级联停，记录保留）", onclick: () => archiveSubagents(id) }, `归档全部子会话（${live.length}）`)
+        : h("span.dim", "都归档了")));
+}
+
+function kidRow(k) {
+  const st = STATUS[phaseOf(k.sessionId)] || STATUS.idle;
+  const archived = S.archived.has(k.sessionId);
+  const cur = k.sessionId === app.current;
+  return h(`div.sh-kid${cur ? ".current" : ""}${archived ? ".archived" : ""}${k.ask ? ".waiting" : ""}`,
+    h("span.sh-kid-glyph", { title: st.label, "aria-hidden": "true" }, st.glyph),
+    h("button.sh-kid-open", { type: "button", title: `打开 ${k.sessionId}`, onclick: () => setCurrent(k.sessionId) },
+      h("b", k.title || "无题 " + k.sessionId.slice(0, 6)),
+      h("code", k.sessionId)),
+    h("span.sh-kid-meta", `${st.label} · 第 ${k.turn} 小节`, k.ask ? h("span.sh-kid-ask", " · 在等你") : null),
+    h("span.sp"),
+    archived
+      ? h("span.chip.plum", "已归档")
+      : h("button.btn.btn-ghost.btn-sm", { type: "button", title: `归档 ${k.sessionId}（记录保留）`, onclick: () => archiveOne(k) }, "归档"));
+}
+
+/** 快照里的直接子会话（序就是 `/sessions` 的返回序）。判据只有 parentSessionId 一处。 */
+export function childrenOf(id) {
+  const out = [];
+  for (const r of app.sessions.values()) if (r.parentSessionId === id) out.push(r);
+  return out;
+}
+
+/** id 的整棵子树（**不含 id 自己**）。环用 seen 挡；默认只有一层，多层也不用改这里。 */
+function subtreeOf(id) {
+  const out = [];
+  const seen = new Set([id]);
+  let frontier = [id];
+  while (frontier.length) {
+    const next = [];
+    for (const r of app.sessions.values()) {
+      if (seen.has(r.sessionId) || !frontier.includes(r.parentSessionId)) continue;
+      seen.add(r.sessionId);
+      out.push(r);
+      next.push(r.sessionId);
+    }
+    frontier = next;
+  }
+  return out;
+}
+
+/**
+ * 批量归档：**逐个**发 `session.archive`。
+ * ⚠️ 不发明一条「批量命令」：核心没有它，而头里合成一条会让「哪些成了、哪些被拒」失去出处
+ * ——核心对「正在跑的会话」是逐条拒的（`IsRunning`），逐条发才分得清是谁没归档。
+ */
+async function archiveRows(rows, title, body) {
+  if (!rows.length) { toast("没有要归档的会话", "warn"); return; }
+  if (!(await confirmDlg({ title, ok: "归档", body }))) return;
+  let done = 0;
+  const refused = [];
+  for (const r of rows) {
+    const ack = await app.core.command({ kind: "session.archive", sessionId: r.sessionId, archived: true });
+    if (ack.accepted) { done++; markArchived(r.sessionId, true); }
+    else refused.push(`${r.title || r.sessionId.slice(0, 8)}：${ack.reason || "被拒"}`);
+  }
+  scheduleRefresh(60);
+  if (refused.length) toast(`已归档 ${done} 个，${refused.length} 个没归档 · ${refused[0]}`, "err", 7000);
+  else toast(`已归档 ${done} 个`, "ok");
+}
+
+/** **一键归档这个会话的子 agent**：它的整棵子树（默认一层，多层也不用改）。 */
+export async function archiveSubagents(id) {
+  const rows = subtreeOf(id).filter((r) => !S.archived.has(r.sessionId));
+  const names = rows.slice(0, 3).map((r) => titleOf(r.sessionId)).join("、");
+  return archiveRows(rows,
+    `归档 ${rows.length} 个子会话？`,
+    `把 ${names}${rows.length > 3 ? ` 等 ${rows.length} 个` : ""} 标为已归档：核心会先级联停掉它们的推进，记录保留（勾上「显示已归档」还能打开）。`);
+}
+
+/** 归档一个会话本身（头部子会话列表里那一行）。 */
+async function archiveOne(r) {
+  return archiveRows([r], "归档这个子会话？",
+    `把 ${titleOf(r.sessionId)} 标为已归档：核心会先级联停掉它的推进，记录保留。`);
 }
 
 async function compact() {
@@ -281,11 +732,16 @@ function moreMenu(anchor) {
   const row = app.sessions.get(id) || {};
   const close = () => menu.remove();
   const item = (label, fn, cls = "") => h(`button.menu-item${cls}`, { type: "button", role: "menuitem", onclick: () => { close(); fn(); } }, label);
+  const kids = childrenOf(id);
+  const liveKids = kids.filter((k) => !S.archived.has(k.sessionId));
   const menu = h("div.menu", { role: "menu" },
     item(archived ? "取消归档" : "归档", async () => {
       const ack = await cmd({ kind: "session.archive", sessionId: id, archived: !archived });
       if (ack.accepted) { markArchived(id, !archived); reopen(); }
     }),
+    // 一键归档子 agent：入口与头部面板里的那颗按钮同一条路（`archiveSubagents`），
+    // 没有子会话时**不出现**——一个点了没反应的菜单项比没有更糟。
+    liveKids.length ? item(`归档 ${liveKids.length} 个子会话…`, () => archiveSubagents(id)) : null,
     item("从内存摘出", () => cmd({ kind: "session.deactivate", sessionId: id }).then(() => scheduleRefresh())),
     row.active === false ? item("载入内存", () => cmd({ kind: "session.activate", sessionId: id }).then(() => scheduleRefresh())) : null,
     item("复制会话 id", () => copy(id)),
@@ -314,10 +770,17 @@ async function del(id) {
   if (ack.accepted) { setCurrent(null); scheduleRefresh(50); }
 }
 // ---------------- live events ----------------
-function onEvent(p, topic) {
+function onEvent(p, topic, seq) {
+  // 缓存里的会话若还订阅着（active），事件也喂给它的时间线：切回时 DOM 已经是最新的。
+  const cached = p.sessionId === app.current ? null : tlCache.get(p.sessionId)?.tl;
+  if (cached) {
+    if (typeof seq === "number") cached.lastSeq = Math.max(cached.lastSeq ?? 0, seq);
+    cached.apply(p);
+  }
   if (!S.topic || topic !== S.topic || p.sessionId !== app.current) return;
   const tl = S.tl;
   if (!tl) return;
+  if (typeof seq === "number") tl.lastSeq = Math.max(tl.lastSeq ?? 0, seq);
   switch (p.kind) {
     case "message.appended":
     case "tool.result.appended":
@@ -396,6 +859,10 @@ function onEvent(p, topic) {
       if (S.snap?.spec) { if (p.archivedAt) S.snap.spec.archivedAt = p.archivedAt; else delete S.snap.spec.archivedAt; }
       markArchived(p.sessionId, !!p.archivedAt);
       renderHead(); renderList();
+      break;
+    case "plan.updated":
+      // 与 /state.plan、GET /plan 逐字同形；只交给 mixer 重画，不往历史里塞记号。
+      if (p.sessionId === app.current) mixer.plan(p.plan);
       break;
     case "session.deactivated":
       scheduleRefresh();
