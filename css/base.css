@@ -42,6 +42,8 @@
   --ease: cubic-bezier(.2, .8, .2, 1);
   --topbar-h: 58px;
   --status-h: 28px;
+  /* 节目单那条波浪的节拍（js/beat.js 会覆盖它） */
+  --bob: 1100ms;
 }
 
 *, *::before, *::after { box-sizing: border-box; }

@@ -37,6 +37,7 @@ function providers(root) {
 
 function provCard(p) {
   const result = h("div.prov-test");
+  const modelResult = h("div.prov-test");
   return h("article.prov-card",
     h("header.pc-h", h("span.pc-glyph", { "aria-hidden": "true" }, "♬"), h("h3", p.id), h("span.sp"),
       p.hasApiKey ? h("span.chip.green", "有 key") : h("span.chip.red", "没 key")),
@@ -51,7 +52,21 @@ function provCard(p) {
       // 所以不能 `p.timeoutSeconds || 100` —— 那会显示一个用户从没配过的数字。
       kvr("调用超时", p.timeoutSeconds ? h("span.num", `${p.timeoutSeconds} 秒`) : h("span.dim", "(默认)"))),
     result,
+    modelResult,
     h("footer.pc-f",
+      h("button.btn.btn-sm", { type: "button", onclick: async (e) => {
+        const b = e.currentTarget; b.disabled = true; b.textContent = "查询中…";
+        swap(modelResult, h("div.dim", "向核心查询上游模型目录…"));
+        const ack = await app.core.command({ kind: "provider.models", id: p.id });
+        b.disabled = false; b.textContent = "获取模型";
+        const ids = ack.data?.models || ack.data?.Models || [];
+        if (!ack.accepted || !ids.length || /^查询模型列表失败/.test(ack.note || "")) {
+          swap(modelResult, h("div.pt-r.bad", ack.note || ack.reason || "没有返回模型"));
+          return;
+        }
+        swap(modelResult, h("div.pt-r.ok", `获取到 ${ids.length} 个模型 · 已填入模型清单，请编辑并保存`));
+        provForm({ ...p, _discoveredModels: ids });
+      } }, "获取模型"),
       h("button.btn.btn-sm", { type: "button", onclick: async (e) => {
         const b = e.currentTarget; b.disabled = true; b.textContent = "试音中…";
         swap(result, h("div.dim", "发一次最小请求，最多 10 秒…"));
@@ -80,7 +95,7 @@ function provForm(p) {
   const key = h("input.inp.mono", { type: "password", autocomplete: "off", placeholder: isNew ? "必填" : "留空 = 保留现有 key", "aria-label": "API key" });
   const model = h("input.inp.mono", { value: p?.defaultModel || "", "aria-label": "默认模型" });
   const endpoint = h("input.inp.mono", { value: p?.endpoint || "", placeholder: "留空 = 官方地址", "aria-label": "端点" });
-  const models = h("input.inp.mono", { value: (p?.models || []).join(", "), placeholder: "逗号分隔，可空", "aria-label": "可选模型" });
+  const models = h("input.inp.mono", { value: (p?._discoveredModels || p?.models || []).join(", "), placeholder: "逗号分隔，可空", "aria-label": "可选模型" });
   // 一次模型调用的超时（秒）。留空 ⇒ **整个键都不发**（= 保留旧值 / 走协议默认）。
   // ⚠️ 不要用 0 或 null 表达「默认」：0 会被核心拒（越界），null 会被读成「保留」。
   const timeout = h("input.inp.num.mono", {
@@ -112,7 +127,7 @@ function provForm(p) {
     if (auth.value) payload.auth = auth.value;
     if (isNew ? endpoint.value.trim() : endpoint.value.trim() !== (p.endpoint || "")) payload.endpoint = endpoint.value.trim();
     const ml = models.value.split(",").map((s) => s.trim()).filter(Boolean);
-    if (isNew ? ml.length : ml.join(",") !== (p.models || []).join(",")) payload.models = ml;
+    if (isNew || ml.join(",") !== (p.models || []).join(",") || !!p?._discoveredModels) payload.models = ml;
     // ⚠️ 先在头里把「不是整数」拦住：核心把非数字读成「没给」⇒ 静默保留旧值并回 ✓，用户以为改了。
     // `type=number` 下用户敲 `30s` 时 .value 是空串，原始文本只落在 validity.badInput 上——
     // 所以「值是空」与「用户什么都没写」在这里必须分开看。

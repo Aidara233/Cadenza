@@ -3,35 +3,83 @@ import { h, fmtTime, fmtAgo, copy } from "./util.js";
 import { renderBlock, attachResult, toolUseBlock } from "./blocks.js";
 import { bindCodeCopy } from "./md.js";
 
+/** 浮动上下文不是「干活」，是模型这一步能看见什么：核心每步合成一对调用 + 结果。
+ *  时间线上一律不画（否则每步都多一张 ≈ 卡片，真正的工具调用被埋掉）；调音台 · 槽位仍有它的全文。
+ *  两个判据：工具名，以及核心给合成调用用的 `floating-` 前缀——结果块里只有 callId，没有工具名。 */
+const isFloating = (callId, name) => name === "floating_context" || String(callId ?? "").startsWith("floating-");
+
+// 同一个滚动容器会被多条缓存时间线反复 attach；复制按钮的委托只绑一次，避免监听器越积越多。
+const codeCopyRoots = new WeakSet();
+function bindCodeCopyOnce(root) {
+  if (codeCopyRoots.has(root)) return;
+  codeCopyRoots.add(root);
+  bindCodeCopy(root, copy);
+}
+
 /**
  * Keys:  message -> "m:"+historyId     toolResult -> "r:"+id     release -> "l:"+id
  * Live messages without historyId cannot be deduped; they are rendered once and never replayed.
  */
 export class Timeline {
-  constructor(sessionId, core, root) {
+  constructor(sessionId, core, root = null) {
     this.id = sessionId;
     this.core = core;
-    this.root = root;
+    this.root = null;
+    this.openSession = (id) => { if (typeof this.onOpenSession === "function") this.onOpenSession(id); };
     this.seen = new Set();
+    // 藏掉浮动上下文的 callId（见 isFloating）：它的结果晚些到、或落在别的分页上时，也照样不画。
+    this.floating = new Set();
     this.cards = new Map();        // callId -> toolcall <details>
     this.orphans = new Map();      // callId -> result waiting for its call (older page)
     this.cursor = null;
     this.hasMore = false;
     this.loading = false;
     this.count = 0;
+    // 缓存用：这条会话已经画到哪个 WS seq（history 的 highWater / 事件的 seq）。
+    // 切回来时从它之后补发，才不会漏掉离开期间的事件；null = 未知，退回快照 highWater。
+    this.lastSeq = null;
+    this.savedScrollTop = null;
+    this.savedAtEnd = true;
     this.list = h("ol.tl-list", { role: "list" });
     this.top = h("li.tl-top", h("button.btn.btn-ghost.btn-sm", { type: "button", onclick: () => this.older() }, "更早的乐章"));
     this.top.hidden = true;
     this.list.append(this.top);
-    root.replaceChildren(this.list);
-    bindCodeCopy(root, copy);
-    this.io = new IntersectionObserver((es) => {
-      if (es.some((e) => e.isIntersecting) && this.hasMore && !this.loading) this.older();
-    }, { root, rootMargin: "300px 0px 0px 0px" });
-    this.io.observe(this.top);
+    this.io = null;
+    if (root) this.attach(root);
   }
 
-  dispose() { this.io.disconnect(); }
+  /** 把（可能是缓存的）时间线挂回舞台。DOM 节点原样复用，不重建。 */
+  attach(root) {
+    this.root = root;
+    root.replaceChildren(this.list);
+    if (!this.io) {
+      this.io = new IntersectionObserver((es) => {
+        if (es.some((e) => e.isIntersecting) && this.hasMore && !this.loading) this.older();
+      }, { root, rootMargin: "300px 0px 0px 0px" });
+    }
+    this.io.disconnect();
+    this.io.observe(this.top);
+    bindCodeCopyOnce(root);
+    if (this.savedAtEnd) this.scrollEnd(true);
+    else if (this.savedScrollTop != null) root.scrollTop = this.savedScrollTop;
+  }
+
+  /** 从舞台摘下但**不销毁**：缓存切回时直接挂回，省掉重新拉历史与重建 DOM。 */
+  detach() {
+    if (!this.root) return;
+    this.savedAtEnd = this.atEnd();
+    this.savedScrollTop = this.root.scrollTop;
+    this.io?.disconnect();
+    this.list.remove();
+    this.root = null;
+  }
+
+  dispose() {
+    this.io?.disconnect();
+    this.io = null;
+    this.list.remove();
+    this.root = null;
+  }
 
   async first() {
     this.loading = true;
@@ -41,6 +89,8 @@ export class Timeline {
       for (const it of page.rendered) this._item(it, frag);
       this.list.append(frag);
       this._page(page);
+      // /history 与 /state 一样带 highWater；以它作为缓存游标，切回来只补这之后的事件。
+      if (typeof page.highWater === "number") this.lastSeq = Math.max(this.lastSeq ?? 0, page.highWater);
       this.scrollEnd(true);
       return page;
     } finally { this.loading = false; }
@@ -52,11 +102,13 @@ export class Timeline {
     this.top.classList.add("loading");
     try {
       const page = await this.core.get(`/sessions/${encodeURIComponent(this.id)}/history?limit=50&before=${encodeURIComponent(this.cursor)}`);
-      const before = this.root.scrollHeight - this.root.scrollTop;
+      // 这一页在飞的时候可能已经切走（detach 后 root 为空）；仍然把内容收进 list，缓存切回时可用。
+      const root = this.root;
+      const before = root ? root.scrollHeight - root.scrollTop : 0;
       const frag = document.createDocumentFragment();
       for (const it of page.rendered) this._item(it, frag);
       this.top.after(frag);
-      this.root.scrollTop = this.root.scrollHeight - before;
+      if (root) root.scrollTop = root.scrollHeight - before;
       this._page(page);
     } catch (e) {
       this.top.querySelector("button").textContent = "加载失败，点此重试";
@@ -95,11 +147,25 @@ export class Timeline {
   _message({ from, blocks, at, key }, into = this.list) {
     if (key) { if (this.seen.has(key)) return; this.seen.add(key); }
     const isUser = from === "user";
-    const body = h("div.msg-body");
+    // 先摘掉浮动上下文：核心常常让它单独成一条消息，摘完就没内容了 —— 那种整条都不画，
+    // 否则时间线上会留一串空气泡（有 meta、没正文）。
+    let hid = false;
+    const shown = [];
     for (const b of blocks || []) {
+      if (b.kind === "toolUse" && isFloating(b.callId, b.name)) {
+        this.floating.add(b.callId);
+        this.orphans.delete(b.callId);   // 结果若先到并停在孤儿区，一起丢掉
+        hid = true;
+        continue;
+      }
+      shown.push(b);
+    }
+    if (hid && !shown.length) return;
+    const body = h("div.msg-body");
+    for (const b of shown) {
       try {
         if (b.kind === "toolUse") {
-          const card = toolUseBlock(b);
+          const card = toolUseBlock(b, { openSession: this.openSession });
           this.cards.set(b.callId, card);
           const orphan = this.orphans.get(b.callId);
           if (orphan) { attachResult(card, orphan); this.orphans.delete(b.callId); }
@@ -121,7 +187,7 @@ export class Timeline {
         h("div.msg-meta",
           h("span.msg-who", isUser ? "你" : "Lilara"),
           h("time", { datetime: at || "", title: at ? fmtAgo(at) : "" }, fmtTime(at)),
-          h("button.icon-btn.msg-copy", { type: "button", "aria-label": "复制这条", onclick: () => copy(plain(blocks)) }, "⧉")),
+          h("button.icon-btn.msg-copy", { type: "button", "aria-label": "复制这条", onclick: () => copy(plain(shown)) }, "⧉")),
         body));
     this._put(li, into);
     return li;
@@ -130,6 +196,9 @@ export class Timeline {
   _result(r, into = this.list) {
     const key = r.id && "r:" + r.id;
     if (key) { if (this.seen.has(key)) return; this.seen.add(key); }
+    // 浮动上下文的结果：调用已经被藏掉，或者这一页只拿到结果（callId 带 floating- 前缀）。
+    // 不拦的话，前者会画成「调用不在视野内」的孤儿卡，后者也会凭空多一张。
+    if (this.floating.has(r.callId) || isFloating(r.callId)) return;
     const card = this.cards.get(r.callId);
     if (card) { attachResult(card, r); return; }
     // Result whose call is on an older page (cannot happen with group paging, but be honest) — park it.
@@ -192,9 +261,12 @@ export class Timeline {
     }
   }
 
-  atEnd() { const r = this.root; return r.scrollHeight - r.scrollTop - r.clientHeight < 80; }
+  atEnd() { const r = this.root; return !r || r.scrollHeight - r.scrollTop - r.clientHeight < 80; }
   scrollEnd(instant = false) {
-    requestAnimationFrame(() => this.root.scrollTo({ top: this.root.scrollHeight, behavior: instant ? "auto" : "smooth" }));
+    requestAnimationFrame(() => {
+      const r = this.root;
+      if (r) r.scrollTo({ top: r.scrollHeight, behavior: instant ? "auto" : "smooth" });
+    });
   }
 }
 

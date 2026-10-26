@@ -56,6 +56,35 @@ export class Core extends Emitter {
     return body;
   }
 
+  /** PUT a JSON body. Non-2xx throws HttpError; body.error is the core's human-readable reason. */
+  async put(path, body) {
+    let r;
+    try {
+      r = await fetch(this.base + path, {
+        method: "PUT", cache: "no-store",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch (e) { throw new HttpError(0, { error: "核心没应答：" + e.message }, path); }
+    let data = null;
+    const text = await r.text();
+    if (text) { try { data = JSON.parse(text); } catch { data = { error: text }; } }
+    if (!r.ok) throw new HttpError(r.status, data, path);
+    return data;
+  }
+
+  /** DELETE without a body. Non-2xx throws HttpError carrying the core's `error`. */
+  async del(path) {
+    let r;
+    try { r = await fetch(this.base + path, { method: "DELETE", cache: "no-store" }); }
+    catch (e) { throw new HttpError(0, { error: "核心没应答：" + e.message }, path); }
+    let data = null;
+    const text = await r.text();
+    if (text) { try { data = JSON.parse(text); } catch { data = { error: text }; } }
+    if (!r.ok) throw new HttpError(r.status, data, path);
+    return data;
+  }
+
   async probe() {
     try {
       this.info = await this.get("/info");

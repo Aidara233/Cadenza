@@ -1,0 +1,16 @@
+# 临时验证脚本：浮动上下文（floating_context）不得出现在时间线上。跑在 2-flow 之后。
+# 历史里确实有 floating_context 的 toolUse / toolResult 对（核心每步合成一对），
+# 所以这里既数卡片，也数「有没有留下空气泡」。
+goto http://127.0.0.1:17994/#stage
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector(".prog-row") ;; 6000
+eval document.querySelector(".prog-row").click()
+until !!document.querySelector('.tl-list') ;; 6000
+until document.querySelectorAll('.msg.from-model').length >= 3 ;; 6000
+eval document.querySelectorAll('.toolcall').length + ' 卡 / ' + document.querySelectorAll('.toolcall[data-tool="floating_context"]').length + ' 浮动 / ' + document.querySelectorAll('.msg').length + ' 条'
+expect document.querySelectorAll('.toolcall[data-tool="floating_context"]').length === 0
+expect !/floating_context/.test(document.querySelector('.tl-list').textContent)
+expect [...document.querySelectorAll('.msg-body')].every((b) => b.childElementCount > 0)
+expect [...document.querySelectorAll('.toolcall .tc-name')].every((e) => e.textContent !== 'floating_context')
+shot 99-floating
+logs

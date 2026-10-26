@@ -7,6 +7,11 @@ const TOOL_GLYPH = {
   fetch: "⇣", git_read: "⑂", git_write: "⑂", dotnet_build: "⚙", dotnet_test: "✓",
   ask: "?", release: "⌇", system_info: "ⓘ",
   web_search: "☁", web_fetch: "↗", finish_goal: "⚑", shell: "❯",
+  // 上下文与计划：浮动槽/压缩/计划树不是「干活」，是「模型能看见什么」——字形也按这个分组。
+  floating_context: "≈", compact: "𝄐", plan: "≡", advance_plan: "→", switch_plan_mode: "◑",
+  // 子 agent 一族（核心 BuiltInTools 的四个机制入口）：派生 / 对下说 / 对上说 / 回流。
+  // ⚠️ 四个必须彼此可辨、也**不能与 git 的 ⑂ 混**：那一族是「记录在哪」，这一族是「谁在说」。
+  spawn: "⎇", tell_child: "⇥", tell_parent: "⇤", subagent_report: "↩",
 };
 export const toolGlyph = (name) => TOOL_GLYPH[name] || "◆";
 
@@ -36,6 +41,18 @@ function argSummary(name, a) {
   if (!a) return "";
   if (name === "web_search" && a.query != null) return String(a.query);
   if (name === "finish_goal") return "结束目标";
+  // 子 agent 一族：`task` / `text` 往往多行，摘要只取一行——全文在卡片里，别在这里吃掉它。
+  if (name === "spawn") {
+    if (a.title) return String(a.title);
+    const task = String(a.task ?? "").replace(/\s+/g, " ").trim();
+    return task ? task.slice(0, 60) : "派生子会话";
+  }
+  if (name === "tell_child") return a.child ? "→ " + String(a.child) : "给子会话补话";
+  if (name === "tell_parent") {
+    const text = String(a.text ?? "").replace(/\s+/g, " ").trim();
+    return text ? text.slice(0, 60) : "对父会话说";
+  }
+  if (name === "subagent_report") return "子会话回报";
   // A shell script can be many lines; the summary shows the first one and the card keeps the original.
   if (name === "shell" && a.command != null) return String(a.command).split("\n")[0].slice(0, 100);
   if (name === "search" && a.pattern != null) {
@@ -51,7 +68,7 @@ function argSummary(name, a) {
 }
 
 /** A tool call card. Result slot is filled later by attachResult(). */
-export function toolUseBlock(b) {
+export function toolUseBlock(b, opts = {}) {
   const a = argsOf(b.arguments);
   const summary = argSummary(b.name, a);
   const body = h("div.tc-body");
@@ -64,12 +81,14 @@ export function toolUseBlock(b) {
   }
   const slot = h("div.tc-result", h("div.tc-pending", h("span.tc-spin", { "aria-hidden": "true" }), "等结果…"));
   // ⚠️ `data-tool` 必须带上：E2E 与样式都按工具名选卡片，少一个应用它的人就得改选择器。
+  const childId = b.name === "subagent_report" && a && typeof a.child === "string" ? a.child : null;
   const card = h("details.toolcall", { dataset: { callId: b.callId, tool: b.name, name: b.name } },
     h("summary",
       h("span.tc-glyph", { "aria-hidden": "true" }, toolGlyph(b.name)),
       h("span.tc-name", b.name),
       summary ? h("span.tc-sum", summary) : null,
       h("span.tc-state", { "aria-label": "状态" }, "…")),
+    childId ? h("div.tc-child-link", h("button.btn.btn-ghost.btn-sm.tc-child", { type: "button", onclick: () => opts.openSession?.(childId) }, "打开子会话 ↗"), h("code", childId)) : null,
     body, slot);
   return card;
 }

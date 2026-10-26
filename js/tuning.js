@@ -5,6 +5,7 @@
 // 那时 ♪ 不存在，不能把唯一入口挂在它身上）。
 import { h } from "./util.js";
 import { CUE_NAMES, CUE_LABEL, audioLevels, patchAudio, onAudioChange, play, unlock } from "./audio.js";
+import { bobMs, setBob, BOB_MIN, BOB_MAX, BOB_STEP } from "./beat.js";
 
 let panel = null;
 let unsub = null;
@@ -60,12 +61,27 @@ export function openTuning(anchor = null) {
     onDone: () => play(name, true),
   }));
 
+  // 节拍：节目单那条波浪的周期（bob），0.6–2.0 秒
+  const beatNum = h("span.tune-num", (bobMs() / 1000).toFixed(1) + "s");
+  const beatRow = h("label.tune-row",
+    h("span.tune-name", "节拍"),
+    h("input.slider", {
+      type: "range", min: String(BOB_MIN), max: String(BOB_MAX), step: String(BOB_STEP),
+      value: String(bobMs()), "aria-label": "节拍（毫秒）",
+      oninput: (e) => {
+        const v = Number(e.target.value);
+        beatNum.textContent = (v / 1000).toFixed(1) + "s";
+        setBob(v);
+      },
+    }),
+    beatNum);
+
   panel = h("div.tune-panel", { role: "dialog", "aria-label": "提示音音量", "aria-modal": "false" },
     h("div.tune-head",
-      h("b", "提示音"),
+      h("b", "提示音 · 节拍"),
       onBtn,
       h("button.icon-btn.tune-x", { type: "button", "aria-label": "关闭", onclick: () => closeTuning() }, "✕")),
-    h("div.tune-rows", master.el, h("div.tune-sep"), ...rows.map((r) => r.el)),
+    h("div.tune-rows", master.el, beatRow, h("div.tune-sep"), ...rows.map((r) => r.el)),
     h("div.tune-foot",
       h("span.dim", "拖动时即时生效；松手试听 · 点外面或 Esc 关闭"),
       h("button.btn.btn-sm.btn-ghost", { type: "button", onclick: () => play("ask", true) }, "试听")));

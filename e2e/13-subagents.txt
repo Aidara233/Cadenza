@@ -1,0 +1,57 @@
+# 子 agent 的界面：折叠 / 关系 chip / 子会话面板 / 一键归档
+#
+# ⚠️ 这一条**不经过核心的 spawn**：`mock.cs` 不派生会话，而这里要验的是「头拿到父 + 子两行
+# 之后画成什么」——所以伪造 /sessions 行，并给 /state、/history、命令通道接上假数据。
+# 真 spawn 的那条路（核心建会话、回流合成对）归核心里那批 `SubagentTests` 管。
+#
+# ⚠️ 每个 step 必须**一行**（cdp.cs 按行读，多行 eval 会被截成半句）。
+# ⚠️ `?core=` 指向一个**没人监听**的端口：这一条只验前端渲染与命令形状，不接核心
+#    ——接上真核心的话 /sessions 里会混进历史会话，断言「正好 3 行」就不再成立。
+goto http://127.0.0.1:17994/?core=http://127.0.0.1:17998
+until !!window.cadenza && !!document.querySelector('.prog-list') ;; 12000
+logs
+eval (() => { const rows = [{ sessionId: "papa0001", projectKey: "pk1", status: "Idle", turn: 3, title: "父会话", parentSessionId: "", active: true, phase: "Idle", ask: null }, { sessionId: "kid00001", projectKey: "pk1", status: "Idle", turn: 1, title: "检索资料", parentSessionId: "papa0001", active: true, phase: "Idle", ask: null }, { sessionId: "kid00002", projectKey: "pk1", status: "WaitingForInput", turn: 2, title: "写报告", parentSessionId: "papa0001", active: true, phase: "Waiting", ask: { askId: "a1", kind: "question", deadlineAt: null } }]; cadenza.core.get = async (p) => { if (p === "/sessions") return rows; if (p === "/projects") return ["pk1"]; if (/\/state$/.test(p)) return { highWater: 0, spec: { projectKey: "pk1", title: "父会话", model: { providerId: "mock", modelId: "mock-flash" }, workingDirectory: "C:/tmp/pk1" }, state: { status: "Idle", turn: 3 }, slots: { floating: "", system: "", premier: "" }, plan: null, goal: { active: false } }; if (/\/history/.test(p)) return { rendered: [], hasMore: false, NextCursor: "", highWater: 0 }; return {}; }; cadenza.core.command = async (p) => { (window.__cmds || (window.__cmds = [])).push(p); return { accepted: true, note: "已归档" }; }; cadenza.core.subscribe = () => {}; cadenza.core.unsubscribe = () => {}; for (const r of rows) cadenza.sessions.set(r.sessionId, r); cadenza.projects.set("pk1", { pk: "pk1", dir: "C:/tmp/pk1" }); cadenza.bus.emit("sessions"); return cadenza.sessions.size; })()
+until document.querySelectorAll('.prog-li').length === 3 ;; 6000
+expect document.querySelectorAll('.prog-row.child').length === 2
+expect document.querySelectorAll('.pr-toggle[role="button"]').length === 1
+expect document.querySelector('.pr-kids').textContent === '2'
+expect document.querySelector('.pr-toggle').getAttribute('aria-expanded') === 'true'
+# 收起：子行消失，但父行上仍看得见「1 个在等你」——收起不等于失明
+eval document.querySelector('.pr-toggle').click()
+wait 200
+expect document.querySelectorAll('.prog-row.child').length === 0
+expect !!document.querySelector('.pr-kidwait') && document.querySelector('.pr-kidwait').textContent === '𝄐1'
+expect document.querySelector('.pr-toggle').getAttribute('aria-expanded') === 'false'
+eval document.querySelector('.pr-toggle').click()
+wait 200
+expect document.querySelectorAll('.prog-row.child').length === 2
+# 头部：关系 chip + 可展开的子会话列表
+eval (() => { cadenza.current = 'papa0001'; cadenza.bus.emit('current', 'papa0001'); return 1; })()
+until !!document.querySelector('.score-h .sh-meta') ;; 6000
+expect !!document.querySelector('.sh-kids-toggle') && /2 个子会话/.test(document.querySelector('.sh-kids-toggle').textContent)
+eval document.querySelector('.sh-kids-toggle').click()
+wait 250
+expect document.querySelectorAll('.sh-kid').length === 2
+expect /在等你/.test(document.querySelector('.sh-kid.waiting')?.textContent || '')
+# 一键归档两个子会话（逐个发 session.archive，确认框点「归档」）
+eval (async () => { const m = await import('./js/stage.js'); window.__arch = m.archiveSubagents('papa0001'); return 'started'; })()
+wait 300
+expect !!document.querySelector('dialog .btn-primary')
+eval document.querySelector('dialog .btn-primary').click()
+wait 800
+eval (window.__cmds || []).filter(c => c.kind === 'session.archive').map(c => c.sessionId).join(',')
+expect (window.__cmds || []).filter(c => c.kind === 'session.archive' && c.archived === true).length === 2
+eval cadenza.bus.emit('sessions')
+wait 250
+# 归档 = 从节目单上消失（这是既有的过滤：`showArchived` 关着时不画）；勾上「显示已归档」才回来
+expect document.querySelectorAll('.prog-row.archived').length === 0
+expect document.querySelectorAll('.prog-row.child').length === 0
+# 归档的不再占「子会话数」：两个都归档了 ⇒ 没有数字、没有开关（没有行可收）
+expect !document.querySelector('.pr-kids') && !document.querySelector('.pr-toggle[role="button"]')
+expect /都已归档/.test(document.querySelector('.sh-kids-toggle')?.textContent || '')
+eval document.querySelector('.prog-arch input').click()
+wait 250
+expect document.querySelectorAll('.prog-row.archived').length === 2
+# 勾上「显示已归档」后行画回来了 ⇒ 开关回来（有行可收），但数字仍然只数未归档的（这里是 0）
+expect !!document.querySelector('.pr-toggle[role="button"]') && !document.querySelector('.pr-kids')
+logs

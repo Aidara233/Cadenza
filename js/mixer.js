@@ -1,9 +1,9 @@
 // Cadenza · mixer — the inspector. Axes as faders, model, context gauge, slots, claims.
-import { h, swap, clear, fmtTokens, fmtNum, fmtTime, fmtAgo, toast, confirmDlg, store, copy } from "./util.js";
+import { h, swap, clear, fmtTokens, fmtNum, fmtTime, fmtAgo, toast, confirmDlg, modal, store, copy } from "./util.js";
 import { app, cmd } from "./model.js";
 import { renderBlock } from "./blocks.js";
 
-const M = { root: null, id: null, snap: null, tab: store.get("mixTab", "axes"), usage: null, context: null, claims: [], body: null };
+const M = { root: null, id: null, snap: null, tab: store.get("mixTab", "axes"), usage: null, context: null, claims: [], body: null, planSel: new Set(), planErr: "", planAt: null };
 
 const AXIS_ICON = { initiative: "♩", permission: "⚿", safety: "⚠", verify: "✓", effort: "✦", temperature: "≈", network: "⌁" };
 // Permission ladder colour bands follow the core's semantics (order is the contract).
@@ -16,6 +16,7 @@ export const mixer = {
     app.bus.on("network", () => { if (M.id && M.tab === "axes") render(); });
   },
   show(id, snap) {
+    if (M.id !== id) { M.planSel.clear(); M.planErr = ""; M.planAt = null; }
     M.id = id; M.snap = snap || null; M.usage = null; M.context = null;
     if (!M.root) return;
     if (!id) { swap(M.root, h("div.mix-idle", h("div.eyebrow", "Mixer"), h("p.dim", "打开一个会话，这里是它的调音台：行为轴、模型、上下文、提示词槽位。"))); return; }
@@ -23,6 +24,15 @@ export const mixer = {
     loadSide();
   },
   axis(name, value) { if (M.snap) { M.snap.axes = { ...M.snap.axes, [name]: value }; if (M.tab === "axes") render(); } },
+  /** plan.updated 带的是与 /state.plan 逐字相同的摘要：照着重画，不合并、不推导。 */
+  plan(summary) {
+    if (!M.snap || !M.id) return;
+    M.snap.plan = summary;
+    M.planAt = null;
+    M.planErr = "";
+    prunePlanSelection(summary);
+    if (M.tab === "plan") render();
+  },
   usage(p) {
     if (M.id !== p.sessionId) return;
     const calls = [...(M.usage?.calls || [])];
@@ -58,7 +68,7 @@ async function loadContext() {
 
 function render() {
   if (!M.root || !M.snap) return;
-  const tabs = [["axes", "行为"], ["model", "模型"], ["slots", "槽位"], ["claims", "声明"]];
+  const tabs = [["axes", "行为"], ["plan", "计划"], ["model", "模型"], ["slots", "槽位"], ["claims", "声明"]];
   const nav = h("div.mix-tabs", { role: "tablist" }, ...tabs.map(([k, l]) => h("button.mix-tab", {
     type: "button", role: "tab", "aria-selected": String(M.tab === k),
     onclick: () => { M.tab = k; store.set("mixTab", k); render(); },
@@ -66,7 +76,7 @@ function render() {
   M.body = h("div.mix-body", { role: "tabpanel" });
   swap(M.root, h("div.mix-gauge-slot"), nav, M.body);
   renderGauge();
-  ({ axes, model, slots, claims })[M.tab]?.(M.body);
+  ({ axes, plan, model, slots, claims })[M.tab]?.(M.body);
 }
 
 // ---------------- context gauge (always visible) ----------------
@@ -188,6 +198,234 @@ async function setAxis(axis, value) {
   const ack = await cmd({ kind: "session.setAxis", sessionId: M.id, axis, value }, { quiet: true });
   if (!ack.accepted) render();
 }
+// ---------------- plan ----------------
+// 计划只存「还剩什么」：没有完成态、没有百分比；推进一格就是把它删掉。
+// 三个入口（/state.plan、GET /plan、plan.updated）的 plan 逐字同形，所以只有一个渲染函数。
+function planIds(tree, out = new Set()) {
+  for (const n of tree || []) { out.add(n.id); planIds(n.children, out); }
+  return out;
+}
+
+function prunePlanSelection(summary) {
+  const ids = planIds(summary?.tree);
+  for (const id of [...M.planSel]) if (!ids.has(id)) M.planSel.delete(id);
+}
+
+async function submitPlan(payload, errEl) {
+  // ⚠️ 走 WS 命令而不是 `PUT /sessions/{id}/plan`：核心的 CORS 只放行 GET/POST/OPTIONS，
+  // 浏览器对 PUT + JSON 的预检会被拒，fetch 只能报 “Failed to fetch”。
+  // `session.plan` 与那条 PUT 共用 PlanJson.ParseEdit，拒绝理由也一样是给人看的一句话。
+  const ack = await app.core.command({ kind: "session.plan", sessionId: M.id, ...payload });
+  if (!ack.accepted) {
+    const msg = ack.reason || "计划编辑被拒绝";
+    M.planErr = msg;
+    if (errEl) errEl.textContent = msg;
+    return false;
+  }
+  M.planErr = "";
+  return true;
+}
+
+function plan(root) {
+  const summary = M.snap.plan || { active: false, remaining: 0 };
+  const tree = summary.tree;              // ⚠️ 缺失 = 普通计划为空（不是空数组）
+  const t0 = summary.t0;                  // ⚠️ 独立于 tree：只有 T0 时 tree 仍缺失
+  const err = h("div.plan-err", { role: "alert" });
+  err.textContent = M.planErr || "";
+  const removeBtn = h("button.btn.btn-sm.btn-ghost.danger-t", { type: "button" }, "删除选中");
+  const syncRemove = () => {
+    removeBtn.disabled = M.planSel.size === 0;
+    removeBtn.textContent = M.planSel.size ? `删除选中 (${M.planSel.size})` : "删除选中";
+  };
+  syncRemove();
+  removeBtn.addEventListener("click", async () => {
+    const ids = [...M.planSel];
+    if (!ids.length) return;
+    const ok = await confirmDlg({
+      title: `删除 ${ids.length} 个节点？`, danger: true, ok: "删除",
+      body: "连同子树一起删掉。删掉最后一个孩子的分支会自己消失，所以它的 id 也会从树里不见了。",
+    });
+    if (!ok) return;
+    if (await submitPlan({ operation: "remove", ids }, err)) {
+      M.planSel.clear(); syncRemove();
+      toast("已提交给核心，等 plan.updated 回来", "ok");
+    }
+  });
+
+  const refresh = h("button.btn.btn-sm.btn-ghost", { type: "button", title: "只刷新计划（GET /sessions/{id}/plan）", onclick: async () => {
+    try {
+      const r = await app.core.get(`/sessions/${encodeURIComponent(M.id)}/plan`);
+      M.snap.plan = r.plan; M.planAt = r.updatedAt || null; M.planErr = "";
+      prunePlanSelection(r.plan);
+    } catch (e) { M.planErr = e.body?.error || e.message; }
+    render();
+  } }, "↻");
+
+  root.append(
+    h("div.mix-sec",
+      h("div.eyebrow", "剩余计划 · plan"),
+      h("div.plan-head",
+        h("b.plan-now", summary.currentTitle || (tree ? "（当前叶子没有标题）" : t0 ? "只有固定 T0" : "没有计划")),
+        h("span.sp"),
+        h("span.chip.num", `${summary.remaining ?? 0} 个节点`),
+        t0 ? h("span.chip.plum", { title: "固定长期任务；不计入剩余节点" }, "T0") : null,
+        M.planAt ? h("span.dim.plan-at", fmtAgo(M.planAt)) : null,
+        refresh),
+      t0 ? renderT0(t0) : null,
+      tree ? renderPlanTree(tree, summary, syncRemove) : h("div.dim", t0 ? "普通计划为空——固定 T0 仍在。" : "没有计划——用下面的「追加叶子」建第一步。"),
+      h("p.hint.dim", "▶ 是当前叶子（第一个叶子），▸ 分支，○ 其余叶子。推进即删除，所以没有「已完成」。")),
+    h("div.mix-sec",
+      h("div.eyebrow", "编辑 · session.plan（与 PUT /plan 同语义）"),
+      h("div.plan-actions",
+        h("button.btn.btn-sm.btn-ghost", { type: "button", onclick: () => overwriteForm(tree) }, "整份覆盖"),
+        h("button.btn.btn-sm.btn-ghost", { type: "button", onclick: () => appendForm(tree) }, "追加叶子"),
+        !t0 ? h("button.btn.btn-sm.btn-ghost", { type: "button", onclick: () => t0Form(null) }, "设置 T0") : null,
+        removeBtn),
+      err,
+      h("p.hint.dim", "提交后不在本地先改：等核心的 plan.updated 回来再画。结构判据全在核心，头只把写的东西原样交上去。")));
+}
+
+/** T0：用户设定的固定长期任务。它不在普通树里，模型不能删；头只通过 PUT /plan/t0 写。 */
+function renderT0(t0) {
+  return h("div.plan-t0",
+    h("div.plan-t0-h",
+      h("span.plan-t0-mark", { "aria-hidden": "true" }, "▣"),
+      h("div.plan-t0-titles",
+        h("div.eyebrow", "T0 · 固定长期任务"),
+        h("b.plan-t0-title", t0.title)),
+      h("span.sp"),
+      h("button.btn.btn-sm.btn-ghost", { type: "button", onclick: () => t0Form(t0) }, "编辑"),
+      h("button.btn.btn-sm.btn-ghost.danger-t", { type: "button", onclick: () => removeT0() }, "移除")),
+    h("div.plan-t0-body", t0.body),
+    h("div.plan-t0-note", "模型能读，但不能通过 plan / advance_plan 修改或删除。"));
+}
+
+async function removeT0() {
+  const ok = await confirmDlg({
+    title: "移除固定 T0？", danger: true, ok: "移除",
+    body: "只清长期任务；普通剩余计划不受影响。移除后模型不再看到这条 T0。",
+  });
+  if (!ok) return;
+  try {
+    await app.core.del(`/sessions/${encodeURIComponent(M.id)}/plan/t0`);
+    M.planErr = "";
+    toast("已提交给核心，等 plan.updated 回来", "ok");
+  } catch (ex) {
+    M.planErr = ex.body?.error || ex.message;
+    if (M.tab === "plan") render();
+  }
+}
+
+function t0Form(t0) {
+  const title = h("input.inp", { maxlength: "160", value: t0?.title || "", placeholder: "长期任务的标题（1..160）", "aria-label": "T0 标题" });
+  const body = h("textarea.txt", { rows: 5, maxlength: "2000", placeholder: "长期任务的正文（1..2000），会原样进提示词", "aria-label": "T0 正文" });
+  body.value = t0?.body || "";
+  const err = h("div.plan-err", { role: "alert" });
+  const form = h("form", { novalidate: true },
+    h("p.hint.dim", "T0 是固定长期任务，与可推进的剩余树分开：它不计入节点数，模型不能删除。写入口是 PUT /sessions/{id}/plan/t0；核心需已重启到支持该端点的版本。"),
+    h("label.field", h("span", "标题"), title),
+    h("label.field", h("span", "正文"), body),
+    err,
+    h("div.dlg-actions",
+      h("button.btn.btn-ghost", { type: "button", onclick: () => m.close() }, "取消"),
+      h("button.btn.btn-primary", { type: "submit" }, t0 ? "保存 T0" : "设置 T0")));
+  const m = modal(t0 ? "编辑 T0" : "设置 T0", form, { wide: true });
+  (t0 ? body : title).focus();
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    err.textContent = "";
+    try {
+      // HTTP PUT：这条没有等价的 WS 命令。失败时把核心的 error 原样显示。
+      await app.core.put(`/sessions/${encodeURIComponent(M.id)}/plan/t0`, { title: title.value, body: body.value });
+      m.close();
+      toast("已提交给核心，等 plan.updated 回来", "ok");
+    } catch (ex) {
+      const msg = ex.body?.error || ex.message;
+      err.textContent = ex.status === 0 ? `${msg}（若核心是刚更新的，先重启它）` : msg;
+    }
+  });
+}
+
+function renderPlanTree(nodes, summary, syncRemove) {
+  const ul = h("ul.plan-tree");
+  for (const n of nodes || []) {
+    const kids = Array.isArray(n.children) ? n.children : [];
+    const branch = kids.length > 0;
+    const current = !branch && n.id === summary.currentId;
+    const pick = h("input.plan-pick", { type: "checkbox", "aria-label": "选中 " + (n.title || n.id), checked: M.planSel.has(n.id) });
+    pick.addEventListener("change", () => {
+      pick.checked ? M.planSel.add(n.id) : M.planSel.delete(n.id);
+      syncRemove();
+    });
+    const li = h(`li.plan-node${branch ? ".branch" : ".leaf"}${current ? ".current" : ""}`,
+      h("div.plan-row",
+        pick,
+        h("span.plan-glyph", { "aria-hidden": "true" }, branch ? "▸" : current ? "▶" : "○"),
+        h("div.plan-main",
+          h("div.plan-line",
+            h("span.plan-title", n.title || h("i.dim", "（无标题）")),
+            current ? h("span.chip.plan-cur", "当前") : null),
+          !branch && !n.body ? h("div.plan-nobody", "叶子没有正文：核心的合法树不会出现，执行前补上") : n.body ? h("div.plan-body", n.body) : null,
+          h("code.plan-id", n.id))));
+    if (branch) li.append(renderPlanTree(kids, summary, syncRemove));
+    ul.append(li);
+  }
+  return ul;
+}
+
+function branchesOf(tree, depth = 0, out = []) {
+  for (const n of tree || []) {
+    const kids = Array.isArray(n.children) ? n.children : [];
+    if (kids.length) { out.push({ id: n.id, label: "· ".repeat(depth) + (n.title || n.id) }); branchesOf(kids, depth + 1, out); }
+  }
+  return out;
+}
+
+function appendForm(tree) {
+  const title = h("input.inp", { maxlength: "160", placeholder: "标题（1..160 字）", "aria-label": "节点标题" });
+  const body = h("textarea.txt", { rows: 4, placeholder: "这一步要做什么（叶子必填，会原样进提示词）", "aria-label": "节点正文" });
+  const parent = h("select.sel", h("option", { value: "" }, "（根）"), ...branchesOf(tree).map((b) => h("option", { value: b.id }, b.label)));
+  const index = h("input.inp.num", { type: "number", min: "0", placeholder: "省略 = 追加", "aria-label": "插入位置" });
+  const err = h("div.plan-err", { role: "alert" });
+  const form = h("form", { novalidate: true },
+    h("label.field", h("span", "标题"), title),
+    h("label.field", h("span", "正文"), body),
+    h("div.grid2", h("label.field", h("span", "挂到哪个分支"), parent), h("label.field", h("span", "位置"), index)),
+    err,
+    h("div.dlg-actions",
+      h("button.btn.btn-ghost", { type: "button", onclick: () => m.close() }, "取消"),
+      h("button.btn.btn-primary", { type: "submit" }, "插入")));
+  const m = modal("追加一个叶子", form);
+  title.focus();
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const payload = { operation: "insert", nodes: [{ title: title.value, body: body.value }] };
+    if (parent.value) payload.parentId = parent.value;
+    if (index.value.trim() !== "") payload.index = Number(index.value);
+    if (await submitPlan(payload, err)) { m.close(); toast("已提交给核心，等 plan.updated 回来", "ok"); }
+  });
+}
+
+function overwriteForm(tree) {
+  const ta = h("textarea.txt.plan-json", { rows: 16, spellcheck: false, "aria-label": "计划节点 JSON" });
+  ta.value = JSON.stringify(tree || [], null, 2);
+  const err = h("div.plan-err", { role: "alert" });
+  const form = h("form", { novalidate: true },
+    h("p.hint.dim", "整份替换。空数组 [] = 清空计划；id 可以省（核心会生成），全树必须唯一。"),
+    ta, err,
+    h("div.dlg-actions",
+      h("button.btn.btn-ghost", { type: "button", onclick: () => m.close() }, "取消"),
+      h("button.btn.btn-primary", { type: "submit" }, "覆盖")));
+  const m = modal("整份覆盖计划", form, { wide: true });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    let nodes;
+    try { nodes = JSON.parse(ta.value); }
+    catch (ex) { err.textContent = "JSON 解析失败：" + ex.message; return; }
+    if (await submitPlan({ operation: "overwrite", nodes }, err)) { m.close(); toast("已提交给核心，等 plan.updated 回来", "ok"); }
+  });
+}
+
 // ---------------- model ----------------
 function model(root) {
   const spec = M.snap.spec || {};
@@ -195,17 +433,29 @@ function model(root) {
   const prov = h("select.sel", { "aria-label": "提供商" }, ...app.providers.map((p) => h("option", { value: p.id, selected: p.id === m.providerId }, p.id)));
   if (!app.providers.some((p) => p.id === m.providerId)) prov.prepend(h("option", { value: m.providerId, selected: true }, m.providerId + "（已不存在）"));
   const modelBox = h("div");
+  let discoveredModels = null;
   const fillModels = () => {
     const p = app.providers.find((x) => x.id === prov.value);
     const keep = prov.value === m.providerId ? m.modelId : p?.defaultModel || "";
-    if (p?.models?.length) {
-      const sel = h("select.sel.mx-model", { "aria-label": "模型" }, ...p.models.map((x) => h("option", { value: x, selected: x === keep }, x)));
-      if (!p.models.includes(keep) && keep) sel.prepend(h("option", { value: keep, selected: true }, keep));
+    const choices = discoveredModels || p?.models || [];
+    if (choices.length) {
+      const sel = h("select.sel.mx-model", { "aria-label": "模型" }, ...choices.map((x) => h("option", { value: x, selected: x === keep }, x)));
+      if (!choices.includes(keep) && keep) sel.prepend(h("option", { value: keep, selected: true }, keep));
       swap(modelBox, sel);
     } else swap(modelBox, h("input.inp.mono.mx-model", { value: keep, "aria-label": "模型", placeholder: "模型 id" }));
   };
-  prov.addEventListener("change", fillModels);
+  prov.addEventListener("change", () => { discoveredModels = null; fillModels(); });
   fillModels();
+  const refreshModels = h("button.btn.btn-sm.btn-ghost", { type: "button", onclick: async (e) => {
+    const b = e.currentTarget; b.disabled = true; b.textContent = "查询中…";
+    try {
+      const ack = await app.core.command({ kind: "provider.models", id: prov.value });
+      const ids = ack.data?.models || ack.data?.Models || [];
+      if (!ack.accepted || !ids.length || /^查询模型列表失败/.test(ack.note || "")) { toast(ack.note || ack.reason || "没有返回模型", "err", 5000); return; }
+      discoveredModels = ids; fillModels();
+      toast(`已从核心获取 ${ids.length} 个模型`, "ok");
+    } finally { b.disabled = false; b.textContent = "刷新列表"; }
+  } }, "刷新列表");
   const tmo = h("input.inp.num", { type: "number", min: 1, placeholder: spec.askTimeout ? "" : "不超时", value: timeoutMinutes(spec.askTimeout) ?? "", "aria-label": "询问超时（分钟）" });
   const apply = h("button.btn.btn-primary.btn-sm", { type: "button" }, "换调");
   apply.addEventListener("click", async () => {
@@ -229,10 +479,14 @@ function model(root) {
       kv("询问超时", spec.askTimeout ? h("code", spec.askTimeout) : h("span.dim", "不超时"))),
     h("div.mix-sec", h("div.eyebrow", "换调 · session.configure"),
       h("label.field", h("span", "提供商"), prov),
-      h("label.field", h("span", "模型"), modelBox),
+      h("label.field", h("span", "模型"), h("div.row", modelBox, refreshModels)),
       h("label.field", h("span", "询问超时（分钟）"), tmo, h("span.hint", "只能设成正数；核心没有「取消超时」的入口")),
-      h("div.row-end", apply)),
-    (spec.plugins || []).length ? h("div.mix-sec", h("div.eyebrow", "插件"), ...spec.plugins.map((p) => h("div.kv-line", h("code", p.id), h("span.dim", " v" + p.version)))) : null);
+      h("div.row-end", apply)));
+  // ⚠️ 这里必须分开 append：`root` 是真实 DOM 节点，原生 append 会把 null 变成文本 "null"，
+  // 而项目里的 h() 才会跳过空孩子。没有插件时页底一直挂着一行 null，就是这么来的。
+  if ((spec.plugins || []).length) {
+    root.append(h("div.mix-sec", h("div.eyebrow", "插件"), ...spec.plugins.map((p) => h("div.kv-line", h("code", p.id), h("span.dim", " v" + p.version)))));
+  }
 }
 
 function timeoutMinutes(ts) {

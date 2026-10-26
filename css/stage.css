@@ -24,12 +24,31 @@
 .pp-badge.wait { color: var(--brass-2); background: var(--brass-dim); }
 .pp-count { color: var(--paper-4); font-size: 11px; letter-spacing: 0; }
 .prog-sessions { list-style: none; margin: 0; padding: 0; }
+/* 一行 = 折叠开关 + 行按钮。开关是行的**兄弟**，不是它的一部分——按钮里再套按钮是非法的，
+   而键盘用户要能单独聚焦它。缩进落在 li 上，于是开关与行一起缩进。 */
+.prog-li { display: flex; align-items: stretch; gap: 2px; padding-left: calc(var(--tree-depth, 0) * 12px); }
+.pr-toggle {
+  flex: none; width: 18px; display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  border-radius: 6px; color: var(--paper-4); font: 11px/1 var(--serif); user-select: none;
+}
+.pr-toggle[role="button"] { cursor: pointer; }
+.pr-toggle[role="button"]:hover { color: var(--paper); background: var(--ink-2); }
+.pr-toggle:focus-visible { outline: 2px solid var(--brass); outline-offset: 1px; }
+.pr-caret { font-size: 10px; line-height: 1; }
+.pr-kids { font: 600 9px/1 var(--mono); color: var(--paper-4); }
+.pr-toggle:hover .pr-kids, .pr-toggle[aria-expanded="true"] .pr-kids { color: var(--paper-3); }
 .prog-row {
-  position: relative; display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; margin: 1px 0;
+  position: relative; display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; padding: 8px 10px; margin: 1px 0;
   border: 1px solid transparent; border-radius: 10px; background: none; color: var(--paper-2); cursor: pointer; text-align: left;
   transition: background .15s, border-color .15s;
 }
 .prog-row:hover { background: var(--ink-2); }
+.prog-row.child { width: auto; }
+/* 收起着的子树里「在等你 / 在跑」各有几个：收起不等于失明 */
+.pr-kidwait { color: var(--brass); }
+.pr-kidrun { color: var(--verdigris); }
+.prog-row.child .pr-tree { color: var(--paper-4); font-size: 12px; }
+.prog-row.orphan { border-left: 2px solid var(--brass-2); }
 .prog-row.current { background: linear-gradient(90deg, var(--brass-dim), rgba(224, 173, 79, .03)); border-color: rgba(224, 173, 79, .3); color: var(--paper); }
 .prog-row.current::before { content: ""; position: absolute; left: -9px; top: 10px; bottom: 10px; width: 3px; border-radius: 3px; background: var(--brass); box-shadow: 0 0 10px var(--brass); }
 .prog-row.archived { opacity: .55; }
@@ -41,15 +60,25 @@
 .prog-row.asleep .pr-glyph { opacity: .55; }
 .pr-glyph { width: 22px; flex: none; text-align: center; font: 17px/1 var(--serif); color: var(--paper-4); }
 .st-run .pr-glyph { color: var(--verdigris); animation: bob 1.1s var(--ease) infinite; }
-.st-gen .pr-glyph { color: var(--verdigris); animation: bob 1.1s var(--ease) infinite; }
+.st-gen .pr-glyph { color: var(--verdigris); }
 .st-tool .pr-glyph { color: var(--sky); }
+/* 谱曲与排练都上下动：两态用同一个动画，相位切换时动画是无缝的（原来只有 gen 有 bob，
+   切到 tool 动画停、切回来又启，才是那条「抽搐」） */
+.st-gen .pr-glyph, .st-tool .pr-glyph { animation: bob var(--bob, 1100ms) var(--ease) infinite; }
 .st-wait .pr-glyph { color: var(--brass); }
 @keyframes bob { 50% { transform: translateY(-3px); } }
-.pr-main { display: grid; min-width: 0; flex: 1; }
+.pr-main { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; flex: 1; }
 .pr-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; }
-.pr-meta { display: flex; gap: 8px; font-size: 11px; color: var(--paper-4); }
+.pr-meta { display: flex; align-items: center; gap: 8px; min-width: 0; white-space: nowrap; overflow: hidden; }
+/* 行内元信息永远是**一行**：flex 子项默认会被压缩，而「第 1366 小节」「⚑ 目标」里都有空格，
+   窄侧栏 + 排练态 + 目标徽标一起出现时就会从空格处折断，把行撑高一倍。
+   除步数外都不许收缩；步数是唯一可让位的那一格，缩到极限用省略号。 */
+.pr-meta > * { flex: none; white-space: nowrap; }
+.pr-meta > .pr-turn { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* 相位词（谱曲 / 排练 / 候场 / 休止）走衬线斜体，和标题栏、演奏条同一副嗓子 */
 .pr-meta span:first-child { font-family: var(--serif); font-style: italic; letter-spacing: .03em; }
+.pr-runtime { min-width: 38px; color: var(--paper-4); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.pr-runtime:empty { display: none; }
 .st-run .pr-meta span:first-child { color: var(--verdigris); }
 .st-gen .pr-meta span:first-child { color: var(--verdigris); }
 .st-tool .pr-meta span:first-child { color: var(--sky); }
@@ -61,6 +90,8 @@
 .prog-row.goal .pr-glyph { color: var(--brass-2); }
 .pr-goal { color: var(--brass-2); }
 .pr-live { width: 6px; height: 6px; border-radius: 50%; background: var(--verdigris); opacity: .7; flex: none; }
+/* 工具调用：行尾一个独立的小标记，不跟行首的字形抢位置（那边现在只表示四态） */
+.pr-tool { color: var(--sky); font: 13px/1 var(--serif); flex: none; opacity: .9; }
 .prog-empty { margin: 12px 4px; }
 .prog-none { padding: 14px; font-size: 12.5px; }
 
@@ -87,6 +118,27 @@
 .sh-status.st-wait .sh-dot { background: var(--brass); box-shadow: 0 0 10px var(--brass); }
 .sh-cwd { cursor: pointer; }
 .sh-actions { display: flex; gap: 6px; align-items: center; flex: none; }
+
+/* 派生关系：父/子都先收成一格 chip，点了才展开——标题栏不该被一棵树撑高 */
+.chip.sh-rel, .chip.sh-kids-toggle { cursor: pointer; }
+.chip.sh-rel:hover, .chip.sh-kids-toggle:hover { color: var(--paper); border-color: var(--line); }
+.sh-caret { margin-left: 4px; font-size: 10px; color: var(--paper-4); }
+.sh-kidpanel { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.sh-kidlist { display: flex; flex-direction: column; gap: 2px; max-height: 34vh; overflow: auto; }
+.sh-kid { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 8px; border: 1px solid transparent; }
+.sh-kid:hover { background: var(--ink-2); }
+.sh-kid.current { border-color: rgba(224, 173, 79, .3); background: var(--brass-dim); }
+.sh-kid.archived { opacity: .55; }
+.sh-kid.waiting { border-color: rgba(224, 173, 79, .28); }
+.sh-kid-glyph { width: 18px; flex: none; text-align: center; color: var(--paper-4); font: 14px/1 var(--serif); }
+.sh-kid.waiting .sh-kid-glyph { color: var(--brass); }
+.sh-kid-open { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.sh-kid-open b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 24ch; }
+.sh-kid-open code { color: var(--paper-4); font-size: 10.5px; }
+.sh-kid-open:hover b { color: var(--brass-2); }
+.sh-kid-meta { color: var(--paper-4); font-size: 11px; white-space: nowrap; }
+.sh-kid-ask { color: var(--brass-2); }
+.sh-kidfoot { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--paper-4); }
 
 .score-scroll {
   flex: 1; min-height: 0; overflow-y: auto; padding: 8px 0 24px; outline: none;
@@ -192,6 +244,8 @@ figure.code code { background: none; padding: 0; color: var(--paper-2); }
 .toolcall > summary { display: flex; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer; list-style: none; font-size: 13px; }
 .toolcall > summary::-webkit-details-marker { display: none; }
 .toolcall > summary:hover { background: rgba(255, 240, 210, .03); }
+.tc-child-link { display: flex; align-items: center; gap: 8px; padding: 8px 12px 0; color: var(--paper-4); font-size: 11px; }
+.tc-child-link code { overflow: hidden; text-overflow: ellipsis; }
 .tc-glyph { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px; background: var(--sky-dim); color: var(--sky); font-size: 13px; flex: none; }
 .toolcall.done .tc-glyph { background: var(--verdigris-dim); color: var(--verdigris); }
 .toolcall.bad .tc-glyph { background: var(--vermilion-dim); color: var(--vermilion); }
@@ -412,6 +466,41 @@ pre.out { margin: 0; padding: 10px 12px; max-height: 360px; overflow: auto; back
 .claim code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .claim .sp { flex: 1; }
 .claim.stale code { text-decoration: line-through; color: var(--paper-4); }
+
+/* ---- plan（剩余计划：推进即删除，没有完成态） ---- */
+.plan-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.plan-now { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--serif); font-style: italic; font-size: 15px; }
+.plan-head .sp { flex: 1; }
+.plan-at { font-size: 11px; flex: none; }
+.plan-tree { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.plan-tree .plan-tree { margin-top: 3px; padding-left: 12px; border-left: 1px dashed var(--line-soft); }
+.plan-node { min-width: 0; }
+.plan-row { display: flex; align-items: flex-start; gap: 6px; min-width: 0; padding: 2px 0; }
+.plan-pick { margin-top: 3px; flex: none; accent-color: var(--brass); }
+.plan-glyph { width: 12px; flex: none; color: var(--paper-4); font-size: 11px; line-height: 1.6; text-align: center; }
+.plan-main { min-width: 0; display: grid; gap: 1px; }
+.plan-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.plan-title { font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-node.current .plan-glyph, .plan-node.current .plan-title { color: var(--brass-2); }
+.plan-cur { flex: none; font-size: 10px; }
+.plan-body { font-size: 12px; color: var(--paper-3); white-space: pre-wrap; overflow-wrap: anywhere; }
+.plan-nobody { font-size: 11.5px; color: #ffb3a1; }
+.plan-id { font-size: 10.5px; color: var(--paper-4); overflow: hidden; text-overflow: ellipsis; }
+.plan-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.plan-err { color: #ffb3a1; font-size: 12.5px; }
+.plan-err:empty { display: none; }
+.plan-json { min-height: 260px; font: 12px/1.55 var(--mono); }
+
+/* T0：固定长期任务。与可推进的剩余树分开显示，不参与勾选/删除。 */
+.plan-t0 { border: 1px solid rgba(224, 173, 79, .35); border-radius: 10px; padding: 8px 10px; display: grid; gap: 6px; background: linear-gradient(180deg, rgba(224, 173, 79, .08), transparent), var(--ink-1); }
+.plan-t0-h { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.plan-t0-mark { color: var(--brass-2); font-size: 12px; flex: none; }
+.plan-t0-titles { min-width: 0; display: grid; gap: 1px; }
+.plan-t0-titles .eyebrow { font-size: 10px; }
+.plan-t0-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.plan-t0-h .sp { flex: 1; }
+.plan-t0-body { font-size: 12px; color: var(--paper-3); white-space: pre-wrap; overflow-wrap: anywhere; }
+.plan-t0-note { font-size: 11px; color: var(--paper-4); }
 
 /* ---- responsive ---- */
 @media (max-width: 1280px) { .stage { grid-template-columns: 250px minmax(0, 1fr) 300px; } }

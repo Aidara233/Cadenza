@@ -91,6 +91,13 @@ export async function refreshSessions() {
     seen.add(r.sessionId);
     const prev = app.sessions.get(r.sessionId);
     const next = { ...prev, ...r, title: r.title, ask: r.ask?.askId ? r.ask : null };
+    // 子会话关系来自快照；核心字段可能在旧构建中缺省，缺省时保留已知关系。
+    if (prev?.parentSessionId && !("parentSessionId" in r)) next.parentSessionId = prev.parentSessionId;
+    // /sessions 不携带前端的持续时间字段；快照合并必须保留，否则 15 秒轮询会把运行计时冲掉。
+    if (prev?.runSince && !r.runSince) next.runSince = prev.runSince;
+    if (prev?.runElapsedMs != null && r.runElapsedMs == null) next.runElapsedMs = prev.runElapsedMs;
+    // /sessions 的 status 是每步磁盘镜像，会在连续运行中短暂落回 Idle。
+    // 运行计时只在 session.phase 事件里开始/结束；刷新快照不判定相位。
     if (prev?.liveAt > started) {
       // An event arrived while this snapshot was in flight: the snapshot is older than what we know.
       next.status = prev.status; next.turn = prev.turn; next.ask = prev.ask;
@@ -158,7 +165,7 @@ export function resetSubscriptions() { subscribedProjects = new Set(); subscribe
 /**
  * Every event that changes "is it running / waiting / failed" goes through here, whichever stream it came on.
  * Views never keep their own copy; they read app.sessions and listen to bus "sessions".
- * Row fields: status · phase · turn · ask · stepAt (step start, ms) · retry {attempt,max,reason,until} · lastError {message,at}
+ * Row fields: status · phase · turn · ask · stepAt (step start, ms) · runSince / runElapsedMs (one Idle-to-Idle interval, including Waiting) · retry {attempt,max,reason,until} · lastError {message,at}
  *
  * status 是协议原话（Running / WaitingForInput / Idle），phase 是**核心报的活动相位**：
  * 核心发 `session.phase`（Generating / Tools / Waiting / Idle，见 `Kernel/SessionPhase`），
@@ -178,7 +185,12 @@ export function onGlobalEvent(p, topic) {
       if (topic.startsWith("project:")) scheduleRefresh();
       break;
     case "session.step.begin":
-      if (r) { touch(); r.status = "Running"; r.stepAt = Date.parse(p.at) || Date.now(); r.retry = null; r.lastError = null; r.active = true; rows = true; }
+      if (r) {
+        touch(); r.status = "Running"; r.stepAt = Date.parse(p.at) || Date.now(); r.retry = null; r.lastError = null; r.active = true;
+        // 第一步开始时启动整段运行计时；后续 step.begin 沿用同一个起点。
+        if (!r.runSince) { r.runElapsedMs = 0; r.runSince = Date.parse(p.at) || Date.now(); }
+        rows = true;
+      }
       break;
     case "session.step.end":
       if (r) { touch(); r.stepAt = null; r.retry = null; rows = true; }
@@ -186,17 +198,33 @@ export function onGlobalEvent(p, topic) {
     case "message.appended":
     case "tool.result.appended":
       // 只记账（liveAt 挡快照回写）：相位由核心的 `session.phase` 报，这里不推。
-      if (r) { touch(); rows = true; }
+      // ⚠️ 也**不 emit "sessions"**：这两个事件不改节目单上的任何字，而 emit 会让
+      // renderList() 整列重建 —— 行元素一换，CSS 的 bob 动画就从 0% 重跳一次。
+      // 工具执行期间每个结果来一发，看起来就是每 0.2 秒抽一下。
+      if (r) touch();
       break;
     case "session.phase": {
       // 四态由核心判（Kernel/SessionPhase）。头只把字符串落成小写键，不派生。
       if (r) {
         const prev = r.phase;
+        const hadRunSince = !!r.runSince;
         touch();
         // 核心说不在等（Generating / Tools / Idle）⇒ 本地那条 ask 作废：
         // 中断、拒答、询问被顶替这几条路都不会再补一条 approval.resolved。
         if (r.ask && p.phase && p.phase !== "Waiting") { dropAsk(r.ask.askId); r.ask = null; }
-        if (typeof p.phase === "string") r.phase = p.phase;
+        if (typeof p.phase === "string") {
+          const wasActive = r.phase === "Generating" || r.phase === "Tools" || r.phase === "Waiting";
+          const isActive = p.phase === "Generating" || p.phase === "Tools" || p.phase === "Waiting";
+          const now = Date.now();
+          // 一段连续运行从 Idle -> 任意活动相位开始，到回到 Idle 结束；Generating / Tools / Waiting
+          // 之间的切换都属于同一段，核心每步发的 session.state=Idle 不参与计时。
+          if (!wasActive && isActive && !hadRunSince) { r.runElapsedMs = 0; r.runSince = now; }
+          else if (wasActive && !isActive) {
+            if (r.runSince) r.runElapsedMs = (r.runElapsedMs || 0) + Math.max(0, now - r.runSince);
+            r.runSince = null;
+          } else if (isActive && !r.runSince) r.runSince = now; // 页面重连时恢复观测
+          r.phase = p.phase;
+        }
         if (typeof p.turn === "number") r.turn = p.turn;
         // 「跑完了、你还没看过」：从有活计落回 Idle，而且不是当前开着的那一场。
         // ⚠️ 只由「打开会话」清掉（见 stage.js 的 open）——那是「检查过进度」这个动作本身，
