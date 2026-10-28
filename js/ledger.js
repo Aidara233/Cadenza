@@ -1,9 +1,39 @@
 // Cadenza · ledger — token usage. null is NOT zero: unreported usage is shown as "—" and counted separately.
-import { h, swap, fmtTokens, fmtNum, fmtTime, fmtDur, jsonBlock, modal, esc } from "./util.js";
+import { h, swap, fmtTokens, fmtNum, fmtTime, fmtDur, jsonBlock, modal, esc, store, toast } from "./util.js";
 import { app, titleOf, setCurrent } from "./model.js";
 
 const L = { root: null, calls: [], total: 0, summary: null, loading: false, sel: null };
-const PAGE = 1000;
+const PAGE = 1000;                       // 核心一次给多少条
+const LIMIT_DEF = 3000;                  // 默认往回翻多少条
+const LIMIT_MAX = 100000;                // 填得再大也不往这上面翻
+const LIMIT_KEY = "ledger.loadLimit";
+
+/** 用户想要的历史条数：落 localStorage，坏值回默认。 */
+function loadLimit() {
+  const n = Math.floor(Number(store.get(LIMIT_KEY, LIMIT_DEF)));
+  return Number.isFinite(n) && n > 0 ? Math.min(n, LIMIT_MAX) : LIMIT_DEF;
+}
+
+/** 加载上限输入框：改完（失焦 / Enter）才落盘并重算，敲键盘的过程中不去翻账簿。 */
+function limitInput() {
+  const inp = h("input.inp.num.lg-limit-in", {
+    type: "number", min: 100, max: LIMIT_MAX, step: 100, value: loadLimit(),
+    "aria-label": "最多加载多少条历史调用",
+  });
+  const commit = () => {
+    const raw = Math.floor(Number(inp.value));
+    if (!Number.isFinite(raw) || raw < 1) { inp.value = loadLimit(); toast("加载上限要是正整数", "warn"); return; }
+    const v = Math.min(raw, LIMIT_MAX);
+    inp.value = v;
+    if (v < raw) toast(`最多加载 ${fmtNum(LIMIT_MAX)} 条`, "warn");
+    if (v === loadLimit() && L.calls.length) return;   // 没变就不重翻
+    store.set(LIMIT_KEY, v);
+    ledgerShown();
+  };
+  inp.addEventListener("change", commit);
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } });
+  return inp;
+}
 
 export function mountLedger(root) {
   L.root = root;
@@ -15,20 +45,26 @@ export async function ledgerShown() {
   if (L.loading) return;
   L.loading = true;
   try {
+    const want = loadLimit();
     const summary = await app.core.get("/usage/summary");
     const first = await app.core.get(`/usage/calls?skip=0&limit=${PAGE}`);
-    let calls = first.calls;
-    // Pull the tail if there are more than one page (keep the most recent PAGE*3).
-    if (first.total > PAGE) {
-      const skip = Math.max(0, first.total - PAGE * 3);
-      calls = [];
-      for (let s = skip; s < first.total; s += PAGE) calls.push(...(await app.core.get(`/usage/calls?skip=${s}&limit=${PAGE}`)).calls);
-    }
-    L.summary = summary; L.calls = calls; L.total = first.total;
+    const total = first.total ?? first.calls.length;
+    const calls = await pullRecent(total, Math.min(want, total), first);
+    L.summary = summary; L.calls = calls; L.total = total;
     render();
   } catch (e) {
     swap(L.root, h("div.ledger-in", h("div.empty", h("div.glyph", "𝄪"), "读不到账本：" + e.message)));
   } finally { L.loading = false; }
+}
+
+/** 取最近 want 条：从 skip=total-want 开始按页拉，正好落在窗口第一页上，不多也不裁。 */
+async function pullRecent(total, want, first) {
+  const from = Math.max(0, total - want);
+  const calls = [];
+  for (let s = from; s < total; s += PAGE) {
+    calls.push(...(s === 0 ? first.calls : (await app.core.get(`/usage/calls?skip=${s}&limit=${PAGE}`)).calls));
+  }
+  return calls;
 }
 
 function render() {
@@ -47,6 +83,8 @@ function render() {
       h("div", h("div.eyebrow", "Ledger"), h("h2", "账簿")),
       h("span.sp"),
       h("span.dim", "token 账本 · 费用不在核心"),
+      h("label.lg-limit", { title: `最多往回翻多少条（按 ${fmtNum(PAGE)} 条一页拉取，上限 ${fmtNum(LIMIT_MAX)}）` },
+        h("span", "加载上限"), limitInput(), h("span.dim", "条")),
       h("button.btn.btn-sm", { type: "button", onclick: () => ledgerShown() }, "↻ 重算")),
     h("div.lg-stats",
       stat("调用", fmtNum(s.calls), `${fmtNum(s.callsWithUnknownUsage ?? 0)} 次未报用量 · ${failed} 次失败${retried ? ` · ${retried} 次是重试` : ""}`),
@@ -54,11 +92,11 @@ function render() {
       stat("输出", fmtTokens(s.outputTokens), `推理 ${fmtTokens(s.reasoningTokens)}`, "sky"),
       stat("缓存命中", cacheRatio != null ? (cacheRatio * 100).toFixed(1) + "%" : "—", cacheRatio != null ? `读 ${fmtTokens(s.cacheReadTokens)} · ${fmtNum(s.callsWithKnownCache ?? 0)} 次报了缓存` : "没有一次报了缓存（不是 0%）", "green", cacheRatio),
       stat("中位耗时", p50 != null ? fmtDur(p50) : "—", `${durs.length} 次有结束时间`)),
-    h("section.card.lg-chart", h("div.card-h", h("h3", "乐句 · 每次调用"), h("span.dim", `最近 ${Math.min(L.calls.length, 120)} 次 · 柱高 = 全部输入（绿 = 命中缓存），点 = 输出`), h("span.sp"), legend()), callsChart(L.calls.slice(-120))),
+    h("section.card.lg-chart", h("div.card-h", h("h3", "乐句 · 每次调用"), h("span.dim", `最近 ${Math.min(L.calls.length, 120)} 次 · 一根柱 = 一次调用，堆叠 输入 + 缓存读 + 输出`), h("span.sp"), legend()), callsChart(L.calls.slice(-120))),
     h("div.lg-grid",
       h("section.card", h("div.card-h", h("h3", "日历"), h("span.dim", "按天堆叠：输入 / 缓存读 / 输出")), dailyChart(L.calls)),
       h("section.card", h("div.card-h", h("h3", "声部"), h("span.dim", "按模型")), breakdown(s.byModel || []), h("div.card-h.mt", h("h3", "乐团"), h("span.dim", "按提供商")), breakdown(s.byProvider || []))),
-    h("section.card", h("div.card-h", h("h3", "明细"), h("span.dim", `共 ${fmtNum(L.total)} 条 · 显示最近 200`)), table(L.calls.slice(-200).reverse()))));
+    h("section.card", h("div.card-h", h("h3", "明细"), h("span.dim", `共 ${fmtNum(L.total)} 条 · 已载入 ${fmtNum(L.calls.length)} · 显示最近 ${Math.min(200, L.calls.length)}`)), table(L.calls.slice(-200).reverse()))));
 }
 
 function stat(label, value, sub, tone = "", frac = null) {
@@ -69,8 +107,9 @@ function stat(label, value, sub, tone = "", frac = null) {
     frac != null ? h("div.lg-bar", h("i", { style: { width: Math.min(100, frac * 100) + "%" } })) : null);
 }
 
+/** 图例按柱内自下而上的顺序排：缓存读 / 输入 / 输出。 */
 function legend() {
-  return h("div.legend", h("span.lg-k.in", "输入"), h("span.lg-k.cache", "缓存读"), h("span.lg-k.out", "输出"), h("span.lg-k.unk", "未报"));
+  return h("div.legend", h("span.lg-k.cache", "缓存读"), h("span.lg-k.in", "输入"), h("span.lg-k.out", "输出"), h("span.lg-k.unk", "未报"));
 }
 
 const NS = "http://www.w3.org/2000/svg";
@@ -93,34 +132,47 @@ function callsChart(calls) {
   const wrap = h("div.chart-wrap");
   if (!calls.length) return h("div.empty", "还没有调用");
   const W = 1000, H = 220, pad = 18;
-  // Full prompt = uncached input + cache read (disjoint since core d1c0895).
-  const prompt = (u) => (u.inputTokens ?? 0) + (u.cacheReadTokens ?? 0);
-  const maxIn = Math.max(1, ...calls.map((c) => (c.usage ? prompt(c.usage) : 0)));
-  const maxOut = Math.max(1, ...calls.map((c) => c.usage?.outputTokens ?? 0));
+  // 输入与缓存读互斥（core d1c0895），输出与它们同柱堆叠 —— 三段共用一个标度，
+  // 所以柱高就是这次调用的全部 token，输出再小也不会被单独的折线放大成主角。
+  const segs = (u) => ({ in: u.inputTokens ?? 0, cache: u.cacheReadTokens ?? 0, out: u.outputTokens ?? 0 });
+  const known = calls.filter((c) => c.usage && c.usage.inputTokens != null);
+  const tot = (c) => { const x = segs(c.usage); return x.in + x.cache + x.out; };
+  const maxTot = Math.max(1, ...known.map(tot));
+  const sumOut = known.reduce((a, c) => a + (c.usage.outputTokens ?? 0), 0);
+  const sumAll = known.reduce((a, c) => a + tot(c), 0);
   const s = svg(W, H, "chart");
-  s.setAttribute("aria-label", `${calls.length} 次调用的输入/输出 token`);
+  s.setAttribute("aria-label", `${calls.length} 次调用：输入、缓存读、输出堆叠在同一根柱上`);
   for (let i = 1; i <= 4; i++) s.append(el("line", { x1: 0, x2: W, y1: pad + (H - pad * 2) * i / 4, y2: pad + (H - pad * 2) * i / 4, class: "grid" }));
   const bw = W / calls.length;
-  const pts = [];
+  const unit = (H - pad * 2) / maxTot;
   calls.forEach((c, i) => {
     const x = i * bw;
     const u = c.usage;
-    const title = `${fmtTime(c.startedAt, true)} · ${c.modelId} · ${c.purpose}${(c.attempt ?? 1) > 1 ? ` · 第 ${c.attempt} 次尝试` : ""}\n未命中 ${fmtNum(u?.inputTokens)} · 缓存读 ${fmtNum(u?.cacheReadTokens)} · 出 ${fmtNum(u?.outputTokens)}${c.status === "failed" ? "\n失败" + (c.error ? "：" + c.error : "") : ""}`;
+    const title = `${fmtTime(c.startedAt, true)} · ${c.modelId} · ${c.purpose}${(c.attempt ?? 1) > 1 ? ` · 第 ${c.attempt} 次尝试` : ""}\n未命中 ${fmtNum(u?.inputTokens)} · 缓存读 ${fmtNum(u?.cacheReadTokens)} · 出 ${fmtNum(u?.outputTokens)}${u ? ` · 共 ${fmtNum(tot(c))}` : ""}${c.status === "failed" ? "\n失败" + (c.error ? "：" + c.error : "") : ""}`;
     if (!u || u.inputTokens == null) {
       s.append(el("rect", { x: x + bw * .2, y: H - pad - 6, width: Math.max(1, bw * .6), height: 6, class: "b-unk" }, title));
       return;
     }
-    const hIn = (H - pad * 2) * (prompt(u) / maxIn);
-    const hCache = (H - pad * 2) * ((u.cacheReadTokens ?? 0) / maxIn);
-    const g = el("g", { class: "bar" + (c.status === "failed" ? " failed" : "") });
-    g.append(el("rect", { x: x + bw * .15, y: H - pad - hIn, width: Math.max(1, bw * .7), height: hIn, class: "b-in", rx: Math.min(3, bw * .2) }, title));
-    if (hCache > 0) g.append(el("rect", { x: x + bw * .15, y: H - pad - hCache, width: Math.max(1, bw * .7), height: hCache, class: "b-cache" }));
+    const v = segs(u);
+    const g = el("g", { class: "bar" + (c.status === "failed" ? " failed" : "") }, title);
+    const stack = [["b-cache", v.cache], ["b-in", v.in], ["b-out", v.out]].filter(([, n]) => n > 0);
+    let base = H - pad;
+    stack.forEach(([cls, n], k) => {
+      // 至少给 1px：非零就有痕迹，但高度仍按同一个标度算。
+      const hh = Math.max(1, n * unit);
+      g.append(el("rect", {
+        x: x + bw * .15, y: base - hh, width: Math.max(1, bw * .7), height: hh,
+        class: cls, rx: k === stack.length - 1 ? Math.min(2.5, bw * .2) : 0,
+      }));
+      base -= hh;
+    });
     s.append(g);
-    if (u.outputTokens != null) pts.push([x + bw / 2, H - pad - (H - pad * 2) * (u.outputTokens / maxOut) * .9]);
   });
-  if (pts.length > 1) s.append(el("polyline", { points: pts.map((p) => p.join(",")).join(" "), class: "l-out" }));
-  for (const [x, y] of pts) s.append(el("circle", { cx: x, cy: y, r: 2.6, class: "d-out" }));
-  wrap.append(s, h("div.chart-axis", h("span", fmtTime(calls[0].startedAt, true)), h("span", "峰值输入 " + fmtTokens(maxIn) + " · 峰值输出 " + fmtTokens(maxOut)), h("span", fmtTime(calls[calls.length - 1].startedAt, true))));
+  const share = sumAll ? (sumOut / sumAll * 100).toFixed(sumOut / sumAll < .1 ? 1 : 0) + "%" : "—";
+  wrap.append(s, h("div.chart-axis",
+    h("span", fmtTime(calls[0].startedAt, true)),
+    h("span", `同一标度 · 峰值 ${fmtTokens(maxTot)} · 输出占 ${share}`),
+    h("span", fmtTime(calls[calls.length - 1].startedAt, true))));
   return wrap;
 }
 
@@ -140,9 +192,9 @@ function dailyChart(calls) {
   return h("div.days", ...list.map((x) => {
     const t = x.in + x.cache + x.out;
     const bar = h("div.day-bar", { title: `${x.d}\n${x.n} 次调用${x.unk ? `（${x.unk} 次未报）` : ""}\n未命中 ${fmtNum(x.in)} · 缓存读 ${fmtNum(x.cache)} · 出 ${fmtNum(x.out)}` },
-      h("i.d-out", { style: { height: (x.out / max) * 100 + "%" } }),
+      h("i.d-cache", { style: { height: (x.cache / max) * 100 + "%" } }),
       h("i.d-in", { style: { height: (x.in / max) * 100 + "%" } }),
-      h("i.d-cache", { style: { height: (x.cache / max) * 100 + "%" } }));
+      h("i.d-out", { style: { height: (x.out / max) * 100 + "%" } }));
     return h("div.day", bar, h("span.day-l.num", x.d.slice(5)), h("span.day-n.num.dim", fmtTokens(t)));
   }));
 }
