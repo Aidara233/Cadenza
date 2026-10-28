@@ -41,10 +41,10 @@ export class Timeline {
     this.savedScrollTop = null;
     this.savedAtEnd = true;
     this.list = h("ol.tl-list", { role: "list" });
-    this.top = h("li.tl-top", h("button.btn.btn-ghost.btn-sm", { type: "button", onclick: () => this.older() }, "更早的乐章"));
+    this.moreButton = h("button.btn.btn-ghost.btn-sm", { type: "button", onclick: () => this.older() }, "加载更早的消息");
+    this.top = h("li.tl-top", this.moreButton);
     this.top.hidden = true;
     this.list.append(this.top);
-    this.io = null;
     if (root) this.attach(root);
   }
 
@@ -52,13 +52,6 @@ export class Timeline {
   attach(root) {
     this.root = root;
     root.replaceChildren(this.list);
-    if (!this.io) {
-      this.io = new IntersectionObserver((es) => {
-        if (es.some((e) => e.isIntersecting) && this.hasMore && !this.loading) this.older();
-      }, { root, rootMargin: "300px 0px 0px 0px" });
-    }
-    this.io.disconnect();
-    this.io.observe(this.top);
     bindCodeCopyOnce(root);
     if (this.savedAtEnd) this.scrollEnd(true);
     else if (this.savedScrollTop != null) root.scrollTop = this.savedScrollTop;
@@ -69,14 +62,11 @@ export class Timeline {
     if (!this.root) return;
     this.savedAtEnd = this.atEnd();
     this.savedScrollTop = this.root.scrollTop;
-    this.io?.disconnect();
     this.list.remove();
     this.root = null;
   }
 
   dispose() {
-    this.io?.disconnect();
-    this.io = null;
     this.list.remove();
     this.root = null;
   }
@@ -84,7 +74,7 @@ export class Timeline {
   async first() {
     this.loading = true;
     try {
-      const page = await this.core.get(`/sessions/${encodeURIComponent(this.id)}/history?limit=50`);
+      const page = await this.core.get(`/sessions/${encodeURIComponent(this.id)}/history?limit=20`);
       const frag = document.createDocumentFragment();
       for (const it of page.rendered) this._item(it, frag);
       this.list.append(frag);
@@ -99,9 +89,11 @@ export class Timeline {
   async older() {
     if (!this.hasMore || this.loading) return;
     this.loading = true;
+    this.moreButton.disabled = true;
+    this.moreButton.textContent = "正在加载…";
     this.top.classList.add("loading");
     try {
-      const page = await this.core.get(`/sessions/${encodeURIComponent(this.id)}/history?limit=50&before=${encodeURIComponent(this.cursor)}`);
+      const page = await this.core.get(`/sessions/${encodeURIComponent(this.id)}/history?limit=20&before=${encodeURIComponent(this.cursor)}`);
       // 这一页在飞的时候可能已经切走（detach 后 root 为空）；仍然把内容收进 list，缓存切回时可用。
       const root = this.root;
       const before = root ? root.scrollHeight - root.scrollTop : 0;
@@ -111,9 +103,11 @@ export class Timeline {
       if (root) root.scrollTop = root.scrollHeight - before;
       this._page(page);
     } catch (e) {
-      this.top.querySelector("button").textContent = "加载失败，点此重试";
+      this.moreButton.textContent = "加载失败，点此重试";
     } finally {
       this.loading = false;
+      this.moreButton.disabled = false;
+      this.moreButton.textContent = this.hasMore ? "加载更早的消息" : "已到最早";
       this.top.classList.remove("loading");
     }
   }
