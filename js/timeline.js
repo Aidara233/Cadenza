@@ -26,6 +26,9 @@ export class Timeline {
     this.core = core;
     this.root = null;
     this.openSession = (id) => { if (typeof this.onOpenSession === "function") this.onOpenSession(id); };
+    // 工具结果里带 `job-…` 时那条「在任务面板里打开」的按钮走这里（舞台把它接到调音台）。
+    this.onJob = null;
+    this.resultOpts = { onJob: (jobId) => { if (typeof this.onJob === "function") this.onJob(jobId); } };
     this.seen = new Set();
     // 藏掉浮动上下文的 callId（见 isFloating）：它的结果晚些到、或落在别的分页上时，也照样不画。
     this.floating = new Set();
@@ -162,7 +165,7 @@ export class Timeline {
           const card = toolUseBlock(b, { openSession: this.openSession });
           this.cards.set(b.callId, card);
           const orphan = this.orphans.get(b.callId);
-          if (orphan) { attachResult(card, orphan); this.orphans.delete(b.callId); }
+          if (orphan) { attachResult(card, orphan, this.resultOpts); this.orphans.delete(b.callId); }
           body.append(card);
         } else body.append(renderBlock(b));
       } catch (e) {
@@ -194,11 +197,11 @@ export class Timeline {
     // 不拦的话，前者会画成「调用不在视野内」的孤儿卡，后者也会凭空多一张。
     if (this.floating.has(r.callId) || isFloating(r.callId)) return;
     const card = this.cards.get(r.callId);
-    if (card) { attachResult(card, r); return; }
+    if (card) { attachResult(card, r, this.resultOpts); return; }
     // Result whose call is on an older page (cannot happen with group paging, but be honest) — park it.
     if (into !== this.list) { this.orphans.set(r.callId, r); return; }
     const stray = toolUseBlock({ callId: r.callId, name: "（调用不在视野内）", arguments: "{}" });
-    attachResult(stray, r);
+    attachResult(stray, r, this.resultOpts);
     this._put(h("li.msg.from-tool", h("div.msg-gutter"), h("div.msg-main", stray)), into);
   }
 

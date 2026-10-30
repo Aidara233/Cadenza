@@ -5,6 +5,32 @@ import { renderBlock } from "./blocks.js";
 
 const M = { root: null, id: null, snap: null, tab: store.get("mixTab", "axes"), usage: null, context: null, claims: [], body: null, planSel: new Set(), planErr: "", planAt: null };
 
+/**
+ * 后台任务面板的状态（2026-10-28 接 `GET /sessions/{id}/jobs` + `jobs.list` / `job.output` / `job.kill`）。
+ *
+ * ⚠️ **它是头里唯一「自己轮询」的块**，而判据是：核心没有任务事件——`job` 的终态
+ * 只会以**一对合成调用**（`job_output` 的自动回报）出现在会话流上。那条流能让时间线
+ * 立刻画出「它跑完了」，却不会告诉我们「还有几个在跑」。所以列表只能拉。
+ *
+ * ⚠️ 轮询的三条闸（少一条就会白烧请求）：**有在跑的任务**、**或者正看着这个页签**、
+ * **且页面没被隐藏**。会话切走 / 面板关掉时定时器必须停——不然每个开过的会话
+ * 都在后台按 2 秒一次的节奏拉一份清单。
+ */
+const J = {
+  sessionId: null, list: [], at: 0, err: "", open: null, sig: "", read: null,
+  timer: 0, soon: 0, ui: null, rows: new Map(), panel: null, pre: null,
+  outHead: null, outErr: null, outActs: null,
+};
+
+/** 任务状态 → 人能念的短词。⚠️ 判据是核心那四个常量（`BackgroundJobState`），不另拼字面量。 */
+const JOB_STATE = {
+  Running: { label: "在跑", cls: "running", glyph: "⏳" },
+  Exited: { label: "已退出", cls: "exited", glyph: "✓" },
+  Killed: { label: "已停止", cls: "killed", glyph: "■" },
+  Lost: { label: "结局未知", cls: "lost", glyph: "?" },
+};
+const jobState = (s) => JOB_STATE[s] || { label: s || "?", cls: "other", glyph: "·" };
+
 const AXIS_ICON = { initiative: "♩", permission: "⚿", safety: "⚠", verify: "✓", effort: "✦", temperature: "≈", network: "⌁" };
 // Permission ladder colour bands follow the core's semantics (order is the contract).
 const PERM_TONE = { off: "deny", readonly: "deny", investigate: "low", standard: "ask", authorized: "hot", trusted: "max" };
@@ -14,14 +40,26 @@ export const mixer = {
     M.root = root;
     // The "axis is on but the core isn't configured" hint depends on app.network.
     app.bus.on("network", () => { if (M.id && M.tab === "axes") render(); });
+    // 页面从后台切回来时补一次：浏览器会把隐藏标签页的定时器冻住，回来时不能等下一轮。
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) { if (M.tab === "jobs") loadJobs(); else if (hasRunning()) scheduleJobs(); }
+    });
   },
   show(id, snap) {
     if (M.id !== id) { M.planSel.clear(); M.planErr = ""; M.planAt = null; }
     M.id = id; M.snap = snap || null; M.usage = null; M.context = null;
+    if (J.sessionId !== id) resetJobs(id);
     if (!M.root) return;
-    if (!id) { swap(M.root, h("div.mix-idle", h("div.eyebrow", "Mixer"), h("p.dim", "打开一个会话，这里是它的调音台：行为轴、模型、上下文、提示词槽位。"))); return; }
+    if (!id) {
+      clearTimeout(J.timer); clearTimeout(J.soon);
+      swap(M.root, h("div.mix-idle", h("div.eyebrow", "Mixer"), h("p.dim", "打开一个会话，这里是它的调音台：行为轴、模型、上下文、提示词槽位。")));
+      return;
+    }
     render();
     loadSide();
+    // ⚠️ 打开会话就拉一次任务表（一个请求）：标题栏那个「⏳ N 在跑」的 chip 全靠它。
+    // 不开轮询——`take` 那一侧会按「有在跑」或「正看着页签」自己决定。
+    loadJobs();
   },
   axis(name, value) { if (M.snap) { M.snap.axes = { ...M.snap.axes, [name]: value }; if (M.tab === "axes") render(); } },
   /** plan.updated 带的是与 /state.plan 逐字相同的摘要：照着重画，不合并、不推导。 */
@@ -44,6 +82,32 @@ export const mixer = {
     if (!M.id) return;
     try { M.snap = await app.core.get(`/sessions/${encodeURIComponent(M.id)}/state`); } catch { }
     render(); loadSide();
+    loadJobs();
+  },
+
+  /** 标题栏那个 chip 读它。`null` = 这个会话的任务表还没拉过（不显示，别编一个 0）。 */
+  jobsSummary(id) {
+    if (!id || J.sessionId !== id || !J.at) return null;
+    const running = J.list.filter((j) => j.state === "Running").length;
+    return { total: J.list.length, running };
+  },
+  /** 跳到「任务」页签；给了 jobId 就顺手把那段输出打开。 */
+  openJobs(jobId) {
+    if (!M.id || !M.root) return;
+    if (M.tab !== "jobs") { M.tab = "jobs"; store.set("mixTab", "jobs"); render(); }
+    if (jobId) openJob(jobId);
+  },
+  /**
+   * 会话流上有动静时叫一声，别等下一轮轮询。
+   * ⚠️ **不按「现在有没有任务在跑」筛**：那个判断读的是**上一次**拉回来的清单——
+   * 打开会话时拉的那一次通常是空的（任务还没起），于是「刚起了第一个任务」这件事
+   * 永远叫不动一次重拉，chip 与列表就停在「没有任务」。去抖 400ms 已经限流了；
+   * 隐藏的页面不拉（浏览器本来也会冻住它）。
+   */
+  refreshJobsSoon() {
+    if (!M.id || document.hidden) return;
+    clearTimeout(J.soon);
+    J.soon = setTimeout(() => { if (M.id && !document.hidden) loadJobs(); }, 400);
   },
 };
 
@@ -66,17 +130,333 @@ async function loadContext() {
   try { const c = await app.core.get(`/sessions/${encodeURIComponent(id)}/context`); if (id === M.id) { M.context = c; renderGauge(); } } catch { }
 }
 
+// ---------------- background jobs ----------------
+// 数据只有一份：`GET /sessions/{id}/jobs`。用户侧的命令（`jobs.list` / `job.output` / `job.kill`）
+// 与它同源，但前者把结果塞在回执的 note 里——那是**给人念的一句话**，形状不该被头依赖。
+// ⇒ 读走 HTTP（结构化），停走命令（有回执、有拒绝理由）。
+
+function resetJobs(id) {
+  clearTimeout(J.timer); clearTimeout(J.soon);
+  J.sessionId = id; J.list = []; J.at = 0; J.err = ""; J.open = null; J.sig = ""; J.read = null;
+  J.ui = null; J.rows.clear();
+  if (J.panel) J.panel.remove();
+}
+
+const hasRunning = () => J.list.some((j) => j.state === "Running");
+
+async function loadJobs() {
+  const id = M.id;
+  if (!id) return;
+  clearTimeout(J.timer);
+  try {
+    const r = await app.core.get(`/sessions/${encodeURIComponent(id)}/jobs`);
+    if (id !== M.id || J.sessionId !== id) return;
+    J.list = r.jobs || [];
+    J.err = "";
+    J.at = Date.now();
+  } catch (e) {
+    if (id !== M.id || J.sessionId !== id) return;
+    J.list = []; J.at = 0;
+    // ⚠️ 旧核心没有这个端点：说清是「核心不认这条路」，别画成「没有任务」——
+    // 后者是**一条事实**，前者是「我看不到」，两者混起来会让人以为任务凭空消失了。
+    J.err = e.status === 404
+      ? "这个核心没有 GET /sessions/{id}/jobs（需要包含后台任务那一批的核心）。"
+      : "拉任务表失败：" + (e.body?.error || e.message);
+  }
+  paintJobs();
+  followOpen();
+  scheduleJobs();
+  app.bus.emit("jobs");   // 标题栏那个 chip 由舞台重画
+}
+
+/**
+ * 让展开的那段输出**跟着长**。
+ *
+ * ⚠️ 这一段是实测逼出来的（2026-10-28 的 `14-jobs`）：面板只在打开时读一次，而「刚起的任务」
+ * 那一次几乎总是读到 0 字节——于是列表在刷、输出窗口永远空白，人要自己去点「接着读」。
+ * 要看的正是「它跑到哪了」，那就必须跟。
+ *
+ * ⚠️ 判据是**已读到的 nextOffset 与任务表说的大小**，不是「上次读之后过了多久」：
+ * 没新字节就不发请求（否则每个轮询周期都白读一次 64 KiB）。
+ * 已经到末尾就停；任务刚结束时若还差最后一段，会被补读一次（那是尾巴，值得看一眼）。
+ */
+function followOpen() {
+  const r = J.read;
+  const job = J.list.find((j) => j.id === J.open);
+  if (!J.open || !r || !job || r.busy || r.error) return;
+  // ⚠️ 判据要取**两个来源里大的那个**：`r.totalBytes` 是「上次读的那一刻」看到的长度，
+  // 而任务刚起来时那一次读几乎必然是 0 字节（`echo` 还没落盘）。只信它 ⇒ `0 >= 0` 永远成立，
+  // 于是「跟随」在第一次空读之后就再也不动了——面板会一直停在「它刚起来」。
+  const known = Math.max(r.totalBytes ?? 0, job.outputBytes ?? 0);
+  if (r.nextOffset >= known) return;
+  readOutput(J.open, r.nextOffset, true);
+}
+
+/** 下一次多久之后再拉。⚠️ 三条闸都在这里，别在别处再排一个定时器。 */
+function scheduleJobs() {
+  clearTimeout(J.timer);
+  if (!M.id || !M.root) return;
+  if (document.hidden) return;                       // 后台标签页：浏览器也会冻住它，不如自己停
+  if (!hasRunning() && M.tab !== "jobs") return;      // 都结束了、也没人在看 ⇒ 停
+  J.timer = setTimeout(loadJobs, hasRunning() ? 2000 : 5000);
+}
+
+function jobsPanel(root) {
+  if (!J.ui || J.ui.root !== root) J.ui = null;
+  if (!J.ui) {
+    const head = h("div.jobs-head");
+    const err = h("div.mix-alert");
+    err.hidden = true;
+    const list = h("div.jobs");
+    J.ui = { root, head, err, list };
+    root.append(h("div.mix-sec",
+      h("div.eyebrow", "后台任务 · jobs"),
+      head, err, list,
+      h("p.hint.dim", "清单来自 GET /sessions/{id}/jobs；「停止」发 job.kill。"
+        + "用户这一侧不受模型权限轴管——模型拨到 off 之后，这里照样能停。")));
+  }
+  paintJobs();
+}
+
+function paintJobs() {
+  const ui = J.ui;
+  if (!ui || !ui.list.isConnected) return;
+  const jobs = J.list || [];
+  const running = jobs.filter((j) => j.state === "Running").length;
+
+  swap(ui.head,
+    h("b", jobs.length ? `${jobs.length} 个任务` : "没有任务"),
+    running ? h("span.chip.green", `${running} 在跑`) : null,
+    h("span.sp"),
+    J.at ? h("span.dim.num", { title: "最后一次拉到清单的时刻" }, "刷新于 " + fmtTime(new Date(J.at).toISOString())) : null,
+    h("button.btn.btn-sm.btn-ghost", { type: "button", title: "立刻重拉任务表", onclick: () => loadJobs() }, "↻"));
+  ui.err.hidden = !J.err;
+  if (J.err) ui.err.textContent = J.err;
+
+  const want = new Set(jobs.map((j) => j.id));
+  for (const [id, row] of J.rows) if (!want.has(id)) { row.li.remove(); J.rows.delete(id); }
+  for (const job of jobs) {
+    let row = J.rows.get(job.id);
+    if (!row) { row = makeJobRow(); J.rows.set(job.id, row); }
+    fillJobRow(row, job);
+  }
+
+  if (!jobs.length && !J.err) {
+    swap(ui.list, h("div.jobs-empty.dim",
+      "本会话没有后台任务。让模型用 ",
+      h("code", "shell"), " / ", h("code", "dotnet_build"), " / ", h("code", "dotnet_test"), " 的 ",
+      h("code", "background: true"), " 起一个；它们结束时会在时间线上留下一对自动回报。"));
+  } else {
+    const sig = jobs.map((j) => j.id).join(",");
+    if (sig !== J.sig) {
+      J.sig = sig;
+      ui.list.replaceChildren(...jobs.map((j) => J.rows.get(j.id).li));
+    } else if (!ui.list.querySelector(".job-row")) {
+      ui.list.replaceChildren(...jobs.map((j) => J.rows.get(j.id).li));
+    }
+  }
+
+  // 展开的那一段跟着它所属的行走（节点持久 ⇒ 已读到的文本与滚动位置都还在）。
+  if (J.open && J.rows.has(J.open) && J.panel) {
+    const row = J.rows.get(J.open);
+    if (J.panel.parentElement !== row.li) row.li.append(J.panel);
+    J.panel.hidden = false;
+    paintOutput();
+  } else {
+    J.open = null;
+    if (J.panel) J.panel.hidden = true;
+  }
+}
+
+function makeJobRow() {
+  const state = h("span.job-state");
+  const kind = h("code.job-kind");
+  const id = h("code.job-id");
+  const acts = h("div.job-acts");
+  const label = h("div.job-label");
+  const meta = h("div.job-meta");
+  const li = h("div.job-row", h("div.job-h", state, kind, id, h("span.sp"), acts), label, meta);
+  return { li, state, kind, id, acts, label, meta };
+}
+
+function fillJobRow(row, job) {
+  const st = jobState(job.state);
+  row.li.dataset.job = job.id;
+  row.li.dataset.state = job.state || "";
+  row.state.className = "job-state st-" + st.cls;
+  row.state.textContent = st.glyph + " " + st.label;
+  row.kind.textContent = job.kind || "?";
+  row.id.textContent = job.id;
+  row.label.textContent = job.label || "（进程没有标签）";
+  row.label.title = job.workingDirectory ? `工作目录 ${job.workingDirectory}` : "";
+  swap(row.meta,
+    h("span", { title: "已保留的输出字节数（上限 4 MiB，超出部分仍排空管道但不保存）" }, "输出 ", h("b.num", fmtNum(job.outputBytes ?? 0)), " 字节"),
+    job.exitCode != null ? h("span", " · 退出码 ", h("b.num", String(job.exitCode))) : null,
+    job.timeoutSeconds ? h("span", " · 时限 ", h("b.num", String(job.timeoutSeconds)), " 秒") : null,
+    job.processId ? h("span.dim", " · pid " + job.processId) : null,
+    h("span.dim", " · 起于 " + fmtTime(job.startedAt, true)),
+    job.endedAt ? h("span.dim", " · 结束于 " + fmtTime(job.endedAt, true)) : null,
+    job.reason ? h("div.job-reason", job.reason) : null);
+
+  const open = J.open === job.id;
+  swap(row.acts,
+    h("button.btn.btn-sm.btn-ghost", {
+      type: "button", "aria-expanded": String(open),
+      onclick: () => (open ? closeJob() : openJob(job.id)),
+    }, open ? "收起" : "输出"),
+    h("button.btn.btn-sm.btn-ghost.danger-t", {
+      type: "button", disabled: job.state !== "Running",
+      title: job.state === "Running" ? "停掉整棵进程树；已写下的输出仍然读得到" : "它已经结束了，没有需要停止的东西",
+      onclick: () => killJob(job.id),
+    }, "停止"));
+}
+
+function closeJob() {
+  J.open = null;
+  J.read = null;
+  if (J.panel) { J.panel.hidden = true; J.panel.remove(); }
+  paintJobs();
+}
+
+/**
+ * 打开某个任务的输出窗口。
+ * ⚠️ 先确认它**在清单里**：从工具卡那条「在任务面板里打开」过来时，清单可能还没拉过
+ * （或刚起、慢一拍）。直接画一个不存在的行会让 `J.open` 被 paintJobs 清掉，
+ * 而表现是「点了没反应」——最坏的一类静默。
+ */
+async function openJob(jobId) {
+  if (!J.list.some((j) => j.id === jobId)) await loadJobs();
+  if (!J.list.some((j) => j.id === jobId)) {
+    toast(`任务表里还没有 ${jobId}——它可能刚起，稍等一下再点`, "warn", 5200);
+    return;
+  }
+  J.open = jobId;
+  J.read = null;
+  ensurePanel();
+  paintJobs();
+  readOutput(jobId, 0, false);
+}
+
+function ensurePanel() {
+  if (J.panel) return J.panel;
+  J.outHead = h("div.job-out-h");
+  J.outErr = h("div.form-err");
+  J.outActs = h("div.job-acts");
+  J.pre = h("pre.job-pre");
+  J.panel = h("div.job-out", J.outHead, J.outErr, J.pre, J.outActs);
+  return J.panel;
+}
+
+function paintOutput() {
+  const r = J.read;
+  if (!J.panel) return;
+  const job = J.list.find((j) => j.id === J.open);
+  if (!r) {
+    if (J.outHead) J.outHead.textContent = "正在读…";
+    if (J.outActs) J.outActs.replaceChildren();
+    if (J.pre) J.pre.textContent = "";
+    return;
+  }
+  const read = r.chunks.reduce((n, c) => n + c.text.length, 0);
+  // 头部那个总数同样取大的那个：`r.totalBytes` 可能还是空读时那一刻的 0（见 followOpen 的注释）。
+  const total = Math.max(r.totalBytes ?? 0, job?.outputBytes ?? 0);
+  swap(J.outHead,
+    h("b", r.chunks.length ? `第 ${r.from}–${r.nextOffset} 字节` : "输出"),
+    total ? h("span.dim", ` · 共 ${fmtNum(total)} 字节`) : null,
+    r.running ? h("span.chip.green", "还在跑，输出会继续增长") : null,
+    r.truncated ? h("span.chip.brass", { title: "超过核心的 4 MiB 保存上限，更早之后的部分没有保存" }, "已截断") : null,
+    r.dropped ? h("span.dim", " · 更早的几段已折叠") : null);
+  J.outErr.textContent = r.error || "";
+  const text = r.chunks.map((c) => c.text).join("");
+  J.pre.textContent = text || (r.busy ? "读取中…"
+    : r.running ? "（还没有输出——它刚起来，等它写第一行）"
+      : "（这个任务没有输出）");
+  // 跟着长的时候要贴在底部，否则「它跑到哪了」还得自己滚。只在追加时贴。
+  if (text) J.pre.scrollTop = J.pre.scrollHeight;
+  swap(J.outActs,
+    h("button.btn.btn-sm", {
+      type: "button", disabled: r.busy || !(r.nextOffset < r.totalBytes),
+      title: r.nextOffset < r.totalBytes ? "读下一段（一次最多 64 KiB）" : "已经读到末尾了",
+      onclick: () => readOutput(J.open, r.nextOffset, true),
+    }, "接着读"),
+    h("button.btn.btn-sm.btn-ghost", {
+      type: "button", disabled: r.busy, onclick: () => readOutput(J.open, 0, false),
+    }, "从头"),
+    h("span.sp"),
+    h("button.btn.btn-sm.btn-ghost", {
+      type: "button", disabled: !read, onclick: () => copy(J.pre.textContent),
+    }, "复制"),
+    job && job.state === "Running"
+      ? h("button.btn.btn-sm.btn-ghost.danger-t", { type: "button", onclick: () => killJob(job.id) }, "停止")
+      : null);
+}
+
+/**
+ * 读一段输出。
+ * ⚠️ **累积显示**而不是「后一段覆盖前一段」：`job_output` 是字节窗口，
+ * 覆盖式显示会让人把中段当成开头（模型那边也是同一个坑，所以核心在结果第一行写明窗口）。
+ * 段数有上限（8 段 ≈ 512 KiB）——一个几 MB 的日志全塞进 DOM 对浏览器不是免费的。
+ */
+async function readOutput(jobId, offset, append) {
+  const id = M.id;
+  if (!id || J.open !== jobId) return;
+  if (!append || !J.read || J.read.jobId !== jobId) {
+    J.read = { jobId, chunks: [], from: offset, nextOffset: offset, totalBytes: null, running: false, truncated: false, error: "", busy: false, dropped: false };
+  }
+  const r = J.read;
+  r.busy = true;
+  paintOutput();
+  try {
+    const res = await app.core.get(`/sessions/${encodeURIComponent(id)}/jobs/${encodeURIComponent(jobId)}/output?offset=${offset}`);
+    if (J.read !== r || J.open !== jobId) return;
+    if (res.text) r.chunks.push({ offset: res.offset, text: res.text });
+    while (r.chunks.length > 8) { r.chunks.shift(); r.dropped = true; r.from = r.chunks[0].offset; }
+    r.nextOffset = res.nextOffset ?? r.nextOffset;
+    r.totalBytes = res.totalBytes ?? r.totalBytes;
+    r.running = !!res.running;
+    r.truncated = !!res.truncated;
+    r.error = "";
+  } catch (e) {
+    if (J.read !== r) return;
+    r.error = "读输出失败：" + (e.body?.error || e.message);
+  } finally {
+    if (J.read === r) { r.busy = false; paintOutput(); }
+  }
+}
+
+/** 停一个任务：**有回执、有拒绝理由**，所以走命令而不是 HTTP（那条路没有 DELETE）。 */
+async function killJob(jobId) {
+  const job = J.list.find((j) => j.id === jobId);
+  const ok = await confirmDlg({
+    title: "停掉这个后台任务？", danger: true, ok: "停止",
+    body: `${jobId}（${job?.kind || "?"}）连同整棵进程树会被杀掉。已经写下的输出仍然读得到；这一步不受模型权限轴管。`,
+  });
+  if (!ok) return;
+  const ack = await cmd({ kind: "job.kill", sessionId: M.id, jobId }, { quiet: true });
+  if (!ack.accepted) { toast(ack.reason || "停止被拒", "err", 6000); return; }
+  toast(ack.note || "已停止", "ok", 5000);
+  loadJobs();
+  // 读着的那一段不会自己变——任务刚被我们杀掉，把窗口重读一次才对得上「已停止」。
+  if (J.open === jobId) readOutput(jobId, 0, false);
+}
+
+
 function render() {
   if (!M.root || !M.snap) return;
-  const tabs = [["axes", "行为"], ["plan", "计划"], ["model", "模型"], ["slots", "槽位"], ["claims", "声明"]];
+  const tabs = [["axes", "行为"], ["plan", "计划"], ["jobs", "任务"], ["model", "模型"], ["slots", "槽位"], ["claims", "声明"]];
   const nav = h("div.mix-tabs", { role: "tablist" }, ...tabs.map(([k, l]) => h("button.mix-tab", {
     type: "button", role: "tab", "aria-selected": String(M.tab === k),
-    onclick: () => { M.tab = k; store.set("mixTab", k); render(); },
-  }, l)));
+    onclick: () => { M.tab = k; store.set("mixTab", k); render(); if (k === "jobs") { loadJobs(); scheduleJobs(); } },
+  }, l, k === "jobs" && J.list.some((j) => j.state === "Running")
+    ? h("span.mix-tab-badge.num", String(J.list.filter((j) => j.state === "Running").length))
+    : null)));
+  // 页签切走后停轮询：没有人在看那个面板，继续拉只是白烧请求。
+  if (M.tab !== "jobs") clearTimeout(J.timer);
   M.body = h("div.mix-body", { role: "tabpanel" });
   swap(M.root, h("div.mix-gauge-slot"), nav, M.body);
   renderGauge();
-  ({ axes, plan, model, slots, claims })[M.tab]?.(M.body);
+  ({ axes, plan, jobs: jobsPanel, model, slots, claims })[M.tab]?.(M.body);
+  if (M.tab === "jobs") scheduleJobs();
 }
 
 // ---------------- context gauge (always visible) ----------------

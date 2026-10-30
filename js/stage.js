@@ -59,6 +59,8 @@ export function mountStage(root) {
   // One source: every status-bearing piece of the stage redraws from the shared row.
   app.bus.on("sessions", onRows);
   app.bus.on("approvals", () => { renderList(); renderCues(); if (!app.current) renderIdle(); });
+  // 任务表变了（拉到了新清单 / 有任务起落）⇒ 标题栏那个 chip 得跟着变，别等下一次 onRows。
+  app.bus.on("jobs", () => { if (app.current && S.snap) renderHead(); });
   app.bus.on("current", (id) => open(id));
   app.core.on("event", onEvent);
   app.core.on("resync", (topic) => { if (topic === S.topic) reopen(); });
@@ -502,12 +504,14 @@ async function open(id) {
       tlCache.delete(id);
       S.tl = hit.tl; S.tlId = id;
       S.tl.onOpenSession = (childId) => setCurrent(childId);
+      S.tl.onJob = (jobId) => mixer.openJobs(jobId);
       S.tl.attach(S.tlRoot);
       watchSession(id, S.tl.lastSeq);
     } else {
       S.tl = new Timeline(id, app.core, S.tlRoot);
       S.tlId = id;
       S.tl.onOpenSession = (childId) => setCurrent(childId);
+      S.tl.onJob = (jobId) => mixer.openJobs(jobId);
       watchSession(id, snap.highWater);
       await S.tl.first();
     }
@@ -590,6 +594,9 @@ function renderHead() {
   const liveKids = kids.filter((k) => !S.archived.has(k.sessionId));
   const kidsWord = liveKids.length > 0 ? `${liveKids.length} 个子会话` : "子会话都已归档";
   const kidsOpen = S.kidsOpen.has(id);
+  // 后台任务：数据来自调音台刚拉的 `GET /sessions/{id}/jobs`（头不自己拉——一处来源）。
+  // ⚠️ 没有数据（还没拉回来 / 旧核心没有这个端点）时**不显示**，而不是显示 0。
+  const jobs = mixer.jobsSummary(id);
   swap(S.head,
     h("div.sh-main",
       h("div.sh-eyebrow",
@@ -619,6 +626,16 @@ function renderHead() {
               title: `${kidsOpen ? "收起" : "展开"}子会话列表 · ${kidsWord}${kids.length > liveKids.length ? ` · 另有 ${kids.length - liveKids.length} 个已归档` : ""}`,
               onclick: () => { kidsOpen ? S.kidsOpen.delete(id) : S.kidsOpen.add(id); renderHead(); },
             }, "⎇ ", kidsWord, h("span.sh-caret", { "aria-hidden": "true" }, kidsOpen ? "▾" : "▸"))
+          : null,
+        jobs && jobs.total
+          ? h(`button.chip.sh-jobs${jobs.running ? ".running" : ""}`, {
+              type: "button",
+              title: jobs.running
+                ? `这个会话有 ${jobs.running} 个后台任务在跑（共 ${jobs.total} 个）。点开看输出 / 停止；它们不随 session.interrupt 停下。`
+                : `这个会话有 ${jobs.total} 个后台任务，都已结束。点开看输出。`,
+              onclick: () => mixer.openJobs(),
+            }, "⏳ ", jobs.running ? `${jobs.running} 在跑` : `${jobs.total} 个任务`,
+            jobs.running && jobs.total > jobs.running ? h("span.dim", ` / ${jobs.total}`) : null)
           : null,
         spec.systemPromptPreset ? h("span.chip", { title: "系统提示词预设" }, "预设 " + spec.systemPromptPreset) : null,
         archived ? h("span.chip.plum", "已归档 " + fmtAgo(spec.archivedAt)) : null,
@@ -786,6 +803,10 @@ function onEvent(p, topic, seq) {
     case "tool.result.appended":
     case "release.recorded":
       tl.apply(p);
+      // 后台任务的起落**没有自己的事件**：它只表现为一对合成调用（`job_output` 的自动回报）
+      // 或者我们自己那条 `shell` / `dotnet_*` 的结果。⇒ 每个工具结果都叫一声，
+      // 由调音台自己决定要不要拉（它有 400ms 去抖，且只在有在跑或正看着页签时真拉）。
+      mixer.refreshJobsSoon();
       break;
     // Status itself is folded by model.onGlobalEvent (runs right after this) and redrawn in onRows.
     case "session.step.begin":

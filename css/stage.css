@@ -406,8 +406,11 @@ pre.out { margin: 0; padding: 10px 12px; max-height: 360px; overflow: auto; back
 .gauge-row { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; font-size: 11px; color: var(--paper-4); }
 .gauge-row b { color: var(--paper-2); font-weight: 500; }
 
-.mix-tabs { position: sticky; top: 0; z-index: 2; display: flex; gap: 2px; padding: 8px 12px; background: rgba(20, 17, 14, .96); border-bottom: 1px solid var(--line-soft); }
-.mix-tab { flex: 1; height: 28px; border: 0; border-radius: 8px; background: none; color: var(--paper-3); cursor: pointer; font: 500 12.5px var(--sans); }
+.mix-tabs { position: sticky; top: 0; z-index: 2; display: flex; gap: 2px; padding: 8px 12px; background: rgba(20, 17, 14, .96); border-bottom: 1px solid var(--line-soft); overflow-x: auto; scrollbar-width: none; }
+.mix-tabs::-webkit-scrollbar { height: 0; }
+/* 六个页签挤在 340px 里：让每个自己收缩、必要时横向滚，不要折成两行（折行会把内容整体推下去）。 */
+.mix-tab { flex: 1 1 auto; min-width: 0; padding: 0 4px; height: 28px; border: 0; border-radius: 8px; background: none; color: var(--paper-3); cursor: pointer; font: 500 12.5px var(--sans); white-space: nowrap; }
+.mix-tab-badge { display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 999px; background: var(--verdigris-dim); color: #a6e3d0; font: 600 10px/16px var(--mono); vertical-align: 1px; }
 .mix-tab:hover { color: var(--paper); }
 .mix-tab[aria-selected="true"] { background: var(--ink-3); color: var(--paper); box-shadow: inset 0 -2px 0 var(--brass); }
 /* minmax(0, 1fr), not the implicit 1fr (= minmax(auto, 1fr)): otherwise the widest control's
@@ -501,6 +504,47 @@ pre.out { margin: 0; padding: 10px 12px; max-height: 360px; overflow: auto; back
 .plan-t0-h .sp { flex: 1; }
 .plan-t0-body { font-size: 12px; color: var(--paper-3); white-space: pre-wrap; overflow-wrap: anywhere; }
 .plan-t0-note { font-size: 11px; color: var(--paper-4); }
+
+/* ================= background jobs（调音台 · 任务页签） ================= */
+/* 一行 = 状态 + 工具名 + 任务 id + 动作；下一行是进程标签（原样，不截断的命令），再下一行是元信息。
+   ⚠️ 任务 id 必须**完整可见**：它是唯一的对账键（时间线的自动回报、job_output、job kill 都靠它）。 */
+.jobs-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12.5px; }
+.jobs-head .sp { flex: 1; }
+.jobs-head b { font-weight: 600; color: var(--paper); }
+.jobs { display: grid; gap: 8px; }
+.jobs-empty { font-size: 12.5px; line-height: 1.65; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 10px; }
+.jobs-empty code { font-size: 11.5px; background: var(--ink-2); padding: 1px 5px; border-radius: 4px; color: var(--paper-2); }
+.job-row { border: 1px solid var(--line-soft); border-radius: 10px; padding: 8px 10px; background: rgba(14, 12, 10, .55); display: grid; gap: 4px; }
+.job-row[data-state="Running"] { border-color: rgba(111, 194, 168, .38); background: linear-gradient(90deg, var(--verdigris-dim), transparent), rgba(14, 12, 10, .55); }
+.job-h { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.job-h .sp { flex: 1; }
+.job-state { flex: none; font: 600 11.5px var(--sans); letter-spacing: .02em; color: var(--paper-3); }
+.job-state.st-running { color: #a6e3d0; }
+.job-state.st-exited { color: var(--paper-2); }
+.job-state.st-killed { color: var(--brass-2); }
+.job-state.st-lost { color: #ffb3a1; }
+.job-kind { flex: none; font-size: 11px; color: var(--paper-4); }
+.job-id { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--paper-3); }
+.job-label { font: 11.5px/1.5 var(--mono); color: var(--paper-2); overflow-wrap: anywhere; white-space: pre-wrap; max-height: 3.2em; overflow: hidden; }
+.job-meta { display: flex; flex-wrap: wrap; gap: 0 4px; font-size: 11px; color: var(--paper-4); }
+.job-reason { flex-basis: 100%; color: var(--paper-2); font-size: 11.5px; }
+.job-acts { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.job-acts .sp { flex: 1; }
+.job-acts .btn { height: 24px; }
+.job-acts .btn[disabled] { opacity: .45; cursor: default; }
+.job-out { margin-top: 6px; border-top: 1px dashed var(--line-soft); padding-top: 8px; display: grid; gap: 6px; }
+.job-out-h { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11.5px; color: var(--paper-3); }
+.job-pre { margin: 0; padding: 8px 10px; max-height: 340px; overflow: auto; background: var(--ink-0); border: 1px solid var(--line-soft); border-radius: 8px; font: 11.5px/1.5 var(--mono); color: var(--paper-2); white-space: pre-wrap; word-break: break-word; }
+.job-pre:empty { display: none; }
+
+/* 标题栏那个「⏳ N 在跑」：与子会话 chip 同一族，在跑用绿（不抢「等你」的金）。 */
+.chip.sh-jobs { cursor: pointer; }
+.chip.sh-jobs:hover { color: var(--paper); border-color: var(--line); }
+.chip.sh-jobs.running { border-color: rgba(111, 194, 168, .4); color: #a6e3d0; background: var(--verdigris-dim); }
+
+/* 工具结果里的「在任务面板里打开」 */
+.tc-joblink { margin-top: 8px; }
+.tc-job code { font-size: 11px; color: var(--paper-2); }
 
 /* ---- responsive ---- */
 @media (max-width: 1280px) { .stage { grid-template-columns: 250px minmax(0, 1fr) 300px; } }

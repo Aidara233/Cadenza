@@ -7,6 +7,10 @@ const TOOL_GLYPH = {
   fetch: "⇣", git_read: "⑂", git_write: "⑂", dotnet_build: "⚙", dotnet_test: "✓",
   ask: "?", release: "⌇", system_info: "ⓘ",
   web_search: "☁", web_fetch: "↗", finish_goal: "⚑", shell: "❯",
+  // 后台任务一族（核心 2026-10-24 那批）：`jobs` 盘点多、`job_output` 读日志、`job_kill` 停进程。
+  // ⚠️ 三个必须彼此可辨，也**不能与 `shell` 的 ❯ 混**：那一族是「这条命令跑完了」，
+  // 这一族是「有个东西还在我背后跑」。`wait` 是等它，字形用一个钟面。
+  jobs: "☷", job_output: "▤", job_kill: "◼", wait: "◷",
   // 上下文与计划：浮动槽/压缩/计划树不是「干活」，是「模型能看见什么」——字形也按这个分组。
   floating_context: "≈", compact: "𝄐", plan: "≡", advance_plan: "→", switch_plan_mode: "◑",
   // 子 agent 一族（核心 BuiltInTools 的四个机制入口）：派生 / 对下说 / 对上说 / 回流。
@@ -53,6 +57,15 @@ function argSummary(name, a) {
     return text ? text.slice(0, 60) : "对父会话说";
   }
   if (name === "subagent_report") return "子会话回报";
+  // 后台任务一族：摘要里给的是**任务 id**（那是唯一能对上别处的键），不是命令原文——
+  // 命令原文在 `shell` 卡上已经有了，这里再来一遍只会把 id 挤出视野。
+  if (name === "jobs") return "本会话的任务表";
+  if (name === "job_output") return a.job ? `${a.job}${a.offset ? ` @${a.offset}` : " · 从头"}` : "读任务输出";
+  if (name === "job_kill") return a.job ? String(a.job) : "停一个任务";
+  if (name === "wait") {
+    const task = a.task ? String(a.task) : "?";
+    return a.timeoutSeconds ? `等 ${task} · 最多 ${a.timeoutSeconds} 秒` : `等 ${task} 到结束`;
+  }
   // A shell script can be many lines; the summary shows the first one and the card keeps the original.
   if (name === "shell" && a.command != null) return String(a.command).split("\n")[0].slice(0, 100);
   if (name === "search" && a.pattern != null) {
@@ -93,7 +106,7 @@ export function toolUseBlock(b, opts = {}) {
   return card;
 }
 
-export function attachResult(card, result) {
+export function attachResult(card, result, opts = {}) {
   const slot = card.querySelector(".tc-result");
   if (!slot) return;
   const text = blocksToText(result.blocks);
@@ -104,14 +117,29 @@ export function attachResult(card, result) {
   card.querySelector(".tc-state").textContent = looksBad ? "被拒 / 失败" : `${lines} 行`;
   slot.replaceChildren(
     h("div.tc-label", "结果"),
-    resultView(result.blocks, text));
+    resultView(result.blocks, text, opts, card));
 }
 
-function resultView(blocks, text) {
+/**
+ * 后台任务的结果里带 `job-…` 时，给一条**就地跳过去**的路。
+ * ⚠️ 只认结果文本里那个 id，不猜「这张卡是不是关于任务的」：`shell` 前台的结果里也可能
+ * 出现这个词（比如 `echo job-abc`），那时多一个按钮只是多一条无用的路，不会说谎；
+ * 反过来按工具名白名单猜，会让「以后某个工具也起后台任务」时这张卡悄悄没有入口。
+ */
+const JOB_ID_RE = /\bjob-[0-9a-f]{6,}\b/;
+
+function resultView(blocks, text, opts = {}, card = null) {
   const nonText = (blocks || []).filter((b) => b.kind !== "text");
   const wrap = h("div.tc-out");
   if (text) wrap.append(h("pre.out", text));
   for (const b of nonText) wrap.append(renderBlock(b));
+  const jobId = opts.onJob ? JOB_ID_RE.exec(text)?.[0] : null;
+  if (jobId) {
+    wrap.append(h("div.tc-joblink",
+      h("button.btn.btn-sm.btn-ghost.tc-job", { type: "button", title: "跳到调音台 · 任务，并打开它的输出", onclick: () => opts.onJob(jobId) },
+        "⏳ 在任务面板里打开 ", h("code", jobId))));
+    if (card) card.dataset.job = jobId;
+  }
   return wrap;
 }
 

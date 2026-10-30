@@ -91,6 +91,22 @@ while (true)
             message = Call("web_search", "{\"query\":\"lilara\"}", "用户要联网搜索。");
         else if (content.Contains("跑命令"))
             message = Call("shell", "{\"command\":\"echo mock-shell-ok\"}", "用户要跑一条命令，用 shell。");
+        // 后台任务一族（14-jobs）：先起一个真进程（4 秒，够「在跑」被看见、也够被停掉），
+        // 再让模型盘点一次任务表。⚠️ 这两个分支必须排在「跑命令」之前见上面的顺序无关——
+        // 「后台跑」里不含「跑命令」，两串不重叠。
+        else if (content.Contains("后台跑"))
+            message = Call("shell", "{\"command\":\"echo bg-start; sleep 30; echo bg-done\",\"background\":true}", "用户要一条后台命令。");
+        else if (content.Contains("盘点任务"))
+            message = Call("jobs", "{}", "用户想看后台任务表。");
+        // `wait`：把对话里出现过的那个 job id 交给它（模型自己也是这么拿到的）。任务此时已被停掉，
+        // 于是 wait 立刻返回「等到了 … Killed」——这一步验的是**卡片**，不是等待本身。
+        else if (content.Contains("等它跑完"))
+        {
+            var jid = FindJobId(msgs);
+            message = jid is null
+                ? Text("没有可等的任务。", null)
+                : Call("wait", $"{{\"task\":\"{jid}\",\"timeoutSeconds\":5}}", "用户要我等后台任务。");
+        }
         // Same tool, but the script takes ~4 s: long enough to interrupt before it finishes,
         // and it leaves two files behind so 「真的被杀掉了吗」有物证可查。
         else if (content.Contains("长命令"))
@@ -169,6 +185,23 @@ static async Task Write(HttpListenerContext ctx, string s)
     ctx.Response.Close();
 }
 static string Trunc(string s) => s.Length > 40 ? s[..40] + "…" : s;
+
+// 对话里出现过的第一个 `job-…`（模板文本，不含正则之外的转义）。mock 自己不知道任务 id，
+// 而 `wait` 需要一个真的——它本来就在前面的工具结果里。
+static string? FindJobId(JsonArray msgs)
+{
+    foreach (var m in msgs)
+    {
+        var c = m?["content"];
+        var s = c is JsonValue v && v.TryGetValue<string>(out var t) ? t : c?.ToJsonString() ?? "";
+        var i = s.IndexOf("job-", StringComparison.Ordinal);
+        if (i < 0) continue;
+        var end = i + 4;
+        while (end < s.Length && Uri.IsHexDigit(s[end])) end++;
+        if (end - i - 4 >= 6) return s[i..end];
+    }
+    return null;
+}
 
 // 最后一条**非浮动**工具结果的文本。goal 收尾要靠它判断「刚跑的是不是 finish_goal」。
 static string LastToolText(JsonArray msgs)

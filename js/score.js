@@ -13,7 +13,7 @@ const FILTER_FIELDS = {
   seq: (x) => String(x.f.seq ?? ""),
 };
 
-// The 19 wire commands. req = required keys; fields drive the form. Key-name quirks are the core's, kept verbatim.
+// The 25 wire commands. req = required keys; fields drive the form. Key-name quirks are the core's, kept verbatim.
 export const COMMANDS = [
   { kind: "session.create", group: "会话", fields: [["cwd", "s"], ["title", "s"], ["preset", "s"], ["askTimeoutMinutes", "n"]], note: "没有 projectKey 参数；note 回的是新会话的 projectKey" },
   { kind: "session.activate", group: "会话", req: ["sessionId"], fields: [["sessionId", "sid"]] },
@@ -29,6 +29,11 @@ export const COMMANDS = [
   { kind: "session.compact", group: "上下文", req: ["sessionId"], fields: [["sessionId", "sid"]] },
   { kind: "session.plan", group: "上下文", req: ["sessionId", "operation"], fields: [["sessionId", "sid"], ["operation", ["overwrite", "insert", "remove"]], ["nodes", "json"], ["parentId", "s"], ["index", "n"], ["ids", "list"]], note: "计划只存剩余：remove 即推进。与 PUT /sessions/{id}/plan 同一解析器；结构判据在核心，error 原样看note" },
   { kind: "claim.release", group: "上下文", req: ["sessionId", "scope"], fields: [["sessionId", "sid"], ["scope", "list"]] },
+  // 后台任务（核心 2026-10-27 那批）。⚠️ 三条都只认**本会话**的任务：
+  // 归属判据在核心的宿主里，头这一侧不自己比对 sessionId。
+  { kind: "jobs.list", group: "后台任务", req: ["sessionId"], fields: [["sessionId", "sid"]], note: "结果是一句给人念的话（每行一个任务），在回执 note 里；结构化形状走 GET /sessions/{id}/jobs" },
+  { kind: "job.output", group: "后台任务", req: ["sessionId", "jobId"], fields: [["sessionId", "sid"], ["jobId", "s"], ["offset", "n"]], note: "一次最多 64 KiB；省略 offset = 0。回执的 data 与 note 各一份（data 是 { text, offset, nextOffset, totalBytes, running, truncated }）" },
+  { kind: "job.kill", group: "后台任务", req: ["sessionId", "jobId"], fields: [["sessionId", "sid"], ["jobId", "s"]], note: "整棵进程树；已结束的再停一次不算失败，也不会改写结局。不受模型权限轴管", danger: true },
   { kind: "approval.respond", group: "审批", req: ["sessionId", "askId", "outcome"], fields: [["sessionId", "sid"], ["askId", "s"], ["outcome", ["submit", "cancel", "modify"]], ["answers", "json"], ["remember", ["", "args", "tool"]]], note: "授权只看 answers.decision（\"allow\" 才批准）" },
   { kind: "preset.set", group: "预设", req: ["id", "content"], fields: [["id", "s"], ["content", "t"]], note: "content 必给；空串合法（= 纯聊天）" },
   { kind: "preset.list", group: "预设", fields: [] },
@@ -202,6 +207,9 @@ function buildForm() {
     "session.configure": { sessionId: app.current || "" },
     "session.setAxis": { sessionId: app.current || "" },
     "approval.respond": { sessionId: app.current || "" },
+    "jobs.list": { sessionId: app.current || "" },
+    "job.output": { sessionId: app.current || "" },
+    "job.kill": { sessionId: app.current || "" },
   };
   const preset = presets[def.kind] || {};
   for (const [name, type] of def.fields) {

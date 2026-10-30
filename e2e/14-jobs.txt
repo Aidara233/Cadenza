@@ -1,0 +1,83 @@
+# 后台任务（核心 2026-10-27 那一批）：真进程起落 + 调音台「任务」页签 + 工具卡跳转
+#
+# ⚠️ 这一条**接真核心**：`shell background:true` 会真的起一个 sh 进程（`sleep 4`），
+#    面板上的状态来自 `GET /sessions/{id}/jobs`，停止走 `job.kill`。mock 负责让它发生
+#    （见 mock.cs 的「后台跑」/「盘点任务」两个分支）。
+goto http://127.0.0.1:17994/#stage
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector('.prog-row') ;; 12000
+
+;; 建一个 trusted 档的会话（shell 是 Destructive，standard 档会被硬拒——那条路 11-shell 已覆盖）
+eval window.__row = (id) => [...document.querySelectorAll('.prog-row')].find(b => b.title.startsWith(id)); window.__say = (t) => { const i = document.querySelector('.composer-inp'); i.value = t; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; }; window.__mk = async (title, tier) => { const a = await cadenza.core.command({ kind: 'session.create', title }); if (tier) await cadenza.core.command({ kind: 'session.setAxis', sessionId: a.sessionId, axis: 'permission', value: tier }); return a.sessionId; }; window.__tab = (name) => { const b = [...document.querySelectorAll('.mix-tab')].find(x => x.textContent.startsWith(name)); if (b) b.click(); return !!b; }; 1
+
+eval (async () => { window.__J = await window.__mk('后台任务', 'trusted'); return window.__J; })()
+until !!window.__row(window.__J) ;; 8000
+eval window.__row(window.__J).click()
+until !!document.querySelector('.ax-permission .seg-b') ;; 10000
+
+;; ---- ① 起一个后台任务：工具卡上直接给出任务 id，并有一条跳去任务面板的路 ----
+eval window.__say('请后台跑一条命令')
+until !!document.querySelector('.toolcall[data-tool="shell"]') ;; 15000
+until document.querySelector('.toolcall[data-tool="shell"]').classList.contains('done') ;; 15000
+expect /已在后台启动/.test(document.querySelector('.toolcall[data-tool="shell"] .tc-result').textContent)
+expect /job-/.test(document.querySelector('.toolcall[data-tool="shell"] .tc-result').textContent)
+expect !!document.querySelector('.toolcall[data-tool="shell"] .tc-job')
+;; 任务 id 从卡上抄下来，后面每一处都对它
+eval window.__jid = document.querySelector('.toolcall[data-tool="shell"] .tc-job code').textContent
+expect /^job-[0-9a-f]{12}$/.test(window.__jid)
+
+;; ---- ② 标题栏的「⏳ N 在跑」：数据来自打开会话时拉的那一次任务表 ----
+until !!document.querySelector('.chip.sh-jobs') ;; 10000
+expect /在跑/.test(document.querySelector('.chip.sh-jobs').textContent)
+
+;; ---- ③ 点工具卡那条路进任务面板（这是唯一不靠手点的入口，值得单独验） ----
+eval document.querySelector('.toolcall[data-tool="shell"] .tc-job').click()
+until !!document.querySelector('.job-row') ;; 10000
+expect document.querySelector('.job-row').dataset.job === window.__jid
+expect document.querySelectorAll('.job-row[data-state="Running"]').length === 1
+expect /在跑/.test(document.querySelector('.job-row .job-state').textContent)
+shot 50-jobs-running
+
+;; ---- ④ 输出：第一行就是它已经吐出来的那一句（`echo bg-start`） ----
+until !!document.querySelector('.job-out .job-pre') ;; 10000
+until /bg-start/.test(document.querySelector('.job-out .job-pre')?.textContent || '') ;; 12000
+expect /第 0–/.test(document.querySelector('.job-out-h').textContent)
+shot 51-jobs-output
+
+;; ---- ⑤ 停止：确认框 → 状态变「已停止」，输出仍然读得到 ----
+eval document.querySelector('.job-row .btn.danger-t').click()
+until !!document.querySelector('dialog .btn-danger') ;; 6000
+eval document.querySelector('dialog .btn-danger').click()
+until document.querySelectorAll('.job-row[data-state="Killed"]').length === 1 ;; 12000
+expect /已停止/.test(document.querySelector('.job-row .job-state').textContent)
+expect /bg-start/.test(document.querySelector('.job-out .job-pre').textContent)
+shot 52-jobs-killed
+
+;; ---- ⑥ 会话自己会收到一对自动回报（核心注入，不是用户发言）：时间线上有 job_output 卡 ----
+until !!document.querySelector('.toolcall[data-tool="job_output"]') ;; 15000
+until document.querySelector('.toolcall[data-tool="job_output"]').classList.contains('done') ;; 15000
+expect /已经结束/.test(document.querySelector('.toolcall[data-tool="job_output"] .tc-result').textContent)
+shot 53-jobs-report
+
+;; ---- ⑦ 模型自己盘点任务表：`jobs` 卡列出同一个 id ----
+until !window.__row(window.__J).classList.contains('st-run') ;; 20000
+wait 400
+eval window.__say('盘点任务')
+until !!document.querySelector('.toolcall[data-tool="jobs"]') ;; 20000
+until document.querySelector('.toolcall[data-tool="jobs"]').classList.contains('done') ;; 20000
+expect document.querySelector('.toolcall[data-tool="jobs"] .tc-result').textContent.includes(window.__jid)
+expect /已停止|已退出/.test(document.querySelector('.toolcall[data-tool="jobs"] .tc-result').textContent)
+shot 54-jobs-tool
+
+;; ---- ⑧ `wait(task=…)` 的卡片：摘要里给的是任务 id，结果是「等到了」那一句 ----
+;; 任务此时已经停了，所以这次 wait 立刻返回——这一步验的是卡片与配对，不是等待本身。
+until !window.__row(window.__J).classList.contains('st-run') ;; 20000
+wait 400
+eval window.__say('等它跑完')
+until !!document.querySelector('.toolcall[data-tool="wait"]') ;; 20000
+expect document.querySelector('.toolcall[data-tool="wait"] .tc-sum').textContent.includes(window.__jid)
+until document.querySelector('.toolcall[data-tool="wait"]').classList.contains('done') ;; 20000
+expect document.querySelector('.toolcall[data-tool="wait"] .tc-result').textContent.includes(window.__jid)
+shot 55-jobs-wait
+
+logs
