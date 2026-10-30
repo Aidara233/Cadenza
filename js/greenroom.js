@@ -50,6 +50,7 @@ function provCard(p) {
       kvr("可选模型", p.models?.length ? h("span", p.models.join(" · ")) : h("span.dim", "未声明（会话里退回文本框）")),
       // 一次模型调用的超时。⚠️ 没配时这个键根本不进 /providers（与 endpoint / authScheme 同一族），
       // 所以不能 `p.timeoutSeconds || 100` —— 那会显示一个用户从没配过的数字。
+      kvr("缓存断点", p.cacheMode ? h("code", p.cacheMode) : h("span.dim", "(默认 auto)")),
       kvr("调用超时", p.timeoutSeconds ? h("span.num", `${p.timeoutSeconds} 秒`) : h("span.dim", "(默认)"))),
     result,
     modelResult,
@@ -104,6 +105,10 @@ function provForm(p) {
     placeholder: "留空 = 协议默认（OpenAI 100 秒；Claude 由 SDK 定）",
     "aria-label": "调用超时（秒）",
   });
+  const cache = h("select.inp", { "aria-label": "缓存形态" },
+    h("option", { value: "" }, "(默认 auto)"),
+    ...(sc.cacheModes || ["auto", "explicit"]).map((v) => h("option", { value: v }, v)));
+  if (p?.cacheMode) cache.value = p.cacheMode;
   const err = h("div.form-err", { role: "alert" });
   const form = h("form", { novalidate: true },
     h("label.field", h("span", h("b", "id")), id, isNew && sc.providerIdRule ? h("span.hint", sc.providerIdRule) : null),
@@ -111,6 +116,8 @@ function provForm(p) {
     h("label.field", h("span", h("b", "API key"), " · 永远不会回显"), key),
     h("div.grid2", h("label.field", h("span", "默认模型"), model), h("label.field", h("span", "端点"), endpoint)),
     h("label.field", h("span", "可选模型"), models),
+    h("label.field", h("span", "缓存断点"), cache,
+      h("span.hint", "explicit = 在请求里标出可复用的前缀（Anthropic 全部模型、OpenAI GPT-5.6+、以及按同一语义实现的网关）。auto = 不标记，交给上游的隐式缓存。⚠️ 标了但端点不支持时，可能连隐式缓存一起失去。")),
     h("label.field", h("span", "调用超时（秒）"), timeout,
       // 区间（1..1800）今天不在 /provider-schema 上，所以头不手抄数字——越界由核心的 reason 显示。
       h("span.hint", "一次模型调用最多等多久（不是一步，也不是询问超时；试音另有固定 10 秒预算）。留空 = 协议默认，清空不会清掉已配的值。")),
@@ -138,6 +145,8 @@ function provForm(p) {
       if (!Number.isInteger(seconds)) { err.textContent = "调用超时要是整数秒（留空 = 用协议默认）。"; return; }
       if (isNew || seconds !== p.timeoutSeconds) payload.timeoutSeconds = seconds;
     }
+    // 缓存断点：与超时同一条「只在变了才发」。选「(默认)」发 auto（= 不标记），这样能回退。
+    if ((cache.value || "auto") !== (p?.cacheMode || "auto")) payload.cacheMode = cache.value || "auto";
     const ack = await app.core.command(payload);
     if (!ack.accepted) { err.textContent = ack.reason; return; }
     m.close();
