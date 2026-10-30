@@ -1,6 +1,6 @@
 // Cadenza · stage — the session view: programme (sidebar) · score (timeline) · mixer (inspector).
 import { h, $, swap, clear, fmtTime, fmtAgo, fmtTokens, fmtNum, fmtDur, store, toast, confirmDlg, modal, debounce, copy, jsonBlock, baseName } from "./util.js";
-import { app, cmd, titleOf, projectLabel, dirOf, rememberDir, setCurrent, refreshSessions, refreshPresets, refreshProviders, scheduleRefresh, watchSession, unwatchSession, markLocal, phaseOf } from "./model.js";
+import { app, cmd, titleOf, projectLabel, dirOf, rememberDir, setCurrent, refreshSessions, refreshPresets, refreshProviders, scheduleRefresh, watchSession, unwatchSession, markLocal, phaseOf, seedRowFromSnapshot, setShowArchived, isArchived as isArchivedInModel, markArchived as markArchivedInModel } from "./model.js";
 import { bobDelay, applyBob, onBob } from "./beat.js";
 import { Timeline } from "./timeline.js";
 import { cueCard, hydrate } from "./approvals.js";
@@ -10,12 +10,13 @@ import { mixer } from "./mixer.js";
 
 const S = {
   root: null,
-  side: null, list: null, filter: { terms: [], raw: "" }, showArchived: store.get("showArchived", false),
+  side: null, list: null, filter: { terms: [], raw: "" }, archInput: null,
   runTimer: 0, runtimeNodes: new Map(),
   head: null, tlRoot: null, cues: null, composer: null, input: null, perf: null,
   mixRoot: null,
   tl: null, tlId: null, snap: null, topic: null, perfTimer: 0, retryNote: null,
-  archived: new Set(store.get("archived", [])),
+  // 归档那一份归 model 管（拉取与对账都在它那里，见 `refreshSessions`）；节目单只读它决定画不画。
+  archived: app.archived,
   collapsed: new Set(store.get("collapsedProjects", [])),
   // 子会话的折叠：按父 id 记（父子关系来自 /sessions 快照，本机记住「我收起了谁」）。
   collapsedParents: new Set(store.get("collapsedParents", [])),
@@ -29,7 +30,11 @@ export function mountStage(root) {
   S.list = h("div.prog-list", { role: "tree", "aria-label": "会话" });
   const search = h("input.inp.prog-search", { type: "search", placeholder: "筛选：title:… project:… status:waiting", "aria-label": "筛选会话", title: "支持 title:、id:、project:、status:（running/waiting/idle）；词之间按 AND 匹配，引号可包含空格" });
   search.addEventListener("input", debounce(() => { S.filter = parseSessionFilter(search.value); renderList(); }, 80));
-  const arch = h("label.check.prog-arch", h("input", { type: "checkbox", checked: S.showArchived, onchange: (e) => { S.showArchived = e.target.checked; store.set("showArchived", S.showArchived); renderList(); } }), "显示已归档");
+  const archInput = h("input", { type: "checkbox", checked: app.showArchived, onchange: (e) => { setShowArchived(e.target.checked); } });
+  S.archInput = archInput;
+  // ⚠️ 勾上才去拉归档那份（`GET /sessions/archived`）：核心换了拉法之后，归档会话不在
+  // `/sessions` 里，本地过滤再怎么对也画不出来——得先去拿。
+  const arch = h("label.check.prog-arch", { title: "归档会话不在 GET /sessions 里：勾上才按需拉一次 GET /sessions/archived" }, archInput, "显示已归档");
   S.side = h("aside.programme", { "aria-label": "节目单" },
     h("div.prog-h",
       h("div", h("div.eyebrow", "Programme"), h("h2", "节目单")),
@@ -145,6 +150,8 @@ function syncChildren(parent, desired) {
 
 function renderList() {
   if (!S.list) return;
+  // 开关可能被 model 拨回去（拉归档失败时），这里的勾子跟着对账，别让控件与事实不一致。
+  if (S.archInput && S.archInput.checked !== !!app.showArchived) S.archInput.checked = !!app.showArchived;
   const groups = new Map();
   for (const pk of app.projects.keys()) groups.set(pk, []);
   for (const r of app.sessions.values()) {
@@ -176,7 +183,7 @@ function renderList() {
       const text = key ? String(values[key] ?? "").toLowerCase() : [r.title, r.sessionId, projectLabel(pk), r.parentSessionId, ph, r.turn].join(" ").toLowerCase();
       return val.includes("*") ? new RegExp("^" + val.split("*").map(escapeFilterRegExp).join(".*") + "$", "i").test(text) : text.includes(val);
     });
-    const baseVisible = (r) => (S.showArchived || !S.archived.has(r.sessionId) || r.sessionId === app.current) && matches(r);
+    const baseVisible = (r) => (app.showArchived || !S.archived.has(r.sessionId) || r.sessionId === app.current) && matches(r);
     const included = new Set(allRows.filter(baseVisible).map((r) => r.sessionId));
     const matching = new Set(allRows.filter(matches).map((r) => r.sessionId));
     // Search results keep their ancestor chain visible as context, including archived parents.
@@ -292,7 +299,13 @@ function renderList() {
     groupsShown++;
   }
   if (!app.sessions.size) {
-    wantedGroups.push(h("div.empty.prog-empty", { dataset: { key: "empty" } }, h("div.glyph", "𝄞"), h("div", "还没有会话"), h("button.btn.btn-sm", { type: "button", onclick: () => newSessionDialog() }, "开始第一首")));
+    // 归档会话不在 `/sessions` 里 ⇒「一条都没有」与「一条未归档的都没有」不是同一句话，
+    // 而这里只知道后者（不勾开关就不拉归档那份）。话只说知道的那部分。
+    wantedGroups.push(h("div.empty.prog-empty", { dataset: { key: "empty" } },
+      h("div.glyph", "𝄞"),
+      h("div", app.showArchived ? "还没有会话" : "没有未归档的会话"),
+      app.showArchived ? null : h("div.dim", "归档的那份要点下方「显示已归档」才会去拉"),
+      h("button.btn.btn-sm", { type: "button", onclick: () => newSessionDialog() }, "开始第一首")));
   } else if (!groupsShown && f) {
     wantedGroups.push(h("div.dim.prog-none", { dataset: { key: "none" } }, "没有匹配「" + f + "」的会话"));
   } else if (!groupsShown) {
@@ -305,11 +318,9 @@ function renderList() {
   syncChildren(S.list, wantedGroups);
 }
 
-export function markArchived(id, on) {
-  if (on) S.archived.add(id); else S.archived.delete(id);
-  store.set("archived", [...S.archived]);
-}
-export const isArchived = (id) => S.archived.has(id);
+// 归档 id 那一份住在 model（拉取与对账都在那边）；这里只是转出去给同一份视图用。
+export const markArchived = markArchivedInModel;
+export const isArchived = isArchivedInModel;
 
 // bobDelay 现在住在 js/beat.js（节拍可调，相位对齐也在那里）
 
@@ -471,7 +482,9 @@ async function open(id) {
   if (!id) { renderIdle(); return; }
   if (!app.sessions.has(id)) await refreshSessions();
   if (my !== openSeq) return;
-  if (!app.sessions.has(id)) { setCurrent(null); return; }
+  // ⚠️ **这里不判「列表里没有就没有这个会话」**：归档会话在新契约里不在 `/sessions` 里，
+  // 从时间线点进一个已归档的子会话、或重开页面恢复上次那一场，走的就是这条路。
+  // 真相在 `/state`；行由快照补（`seedRowFromSnapshot`）。真没了的会话在下面 404 时退回门厅。
 
   S.root.classList.add("has-session");
   swap(S.head, headSkeleton(id));
@@ -488,6 +501,9 @@ async function open(id) {
     S.snap = snap;
     if (snap.spec?.workingDirectory) rememberDir(snap.spec.projectKey, snap.spec.workingDirectory);
     markArchived(id, !!snap.spec?.archivedAt);
+    // 归档的那一行不在 `/sessions` 里 ⇒ 用快照补一行；不补的话节目单和头部会按「没有这一行」画
+    // （相位、运行计时、父子关系全掉）。
+    if (!app.sessions.has(id)) seedRowFromSnapshot(id, snap);
     S.topic = "session:" + id;
     // The snapshot is the freshest truth we have at highWater; seed the shared row from it.
     markLocal(id, { status: snap.state?.status || "Idle", turn: snap.state?.turn ?? 0, ask: snap.ask?.askId ? { askId: snap.ask.askId, kind: snap.ask.kind, deadlineAt: snap.ask.deadlineAt } : null });
@@ -524,10 +540,13 @@ async function open(id) {
     S.input.focus({ preventScroll: true });
   } catch (e) {
     if (my !== openSeq) return;
+    // 404 = 真没有这个会话（不是「列表里没有」，那条路上面已经放行了）⇒ 退回门厅，
+    // 顺手把 `lastSession` 清掉（`setCurrent(null)` 会做），下次开页面不要再白试一次。
+    if (e.status === 404) { setCurrent(null); return; }
     const tooNew = e.status >= 500;
     swap(S.tlRoot, h("div.empty.tl-err",
       h("div.glyph", "𝄪"),
-      h("div", tooNew ? "这个核心读不了这个会话（可能是更新的核心写的）。别删它——用写它的那个核心打开。" : e.status === 404 ? "会话不存在了。" : "打不开：" + e.message),
+      h("div", tooNew ? "这个核心读不了这个会话（可能是更新的核心写的）。别删它——用写它的那个核心打开。" : "打不开：" + e.message),
       h("button.btn.btn-sm", { type: "button", onclick: () => reopen() }, "重试")));
   }
 }

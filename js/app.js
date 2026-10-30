@@ -57,7 +57,10 @@ async function boot() {
   await loadRegistries();
   await refreshSessions();
   const last = new URLSearchParams(location.search).get("session") || store.get("lastSession");
-  if (last && app.sessions.has(last)) setCurrent(last);
+  // ⚠️ 不再要求它出现在列表里：归档会话在新契约里不在 `/sessions` 里，而「上次开着的那一场」
+  // 还是该开回来。行由 `open()` 用 `/state` 快照补；真没了的会话它会退回门厅。
+  // 核心没应答时不试（`app.info` 为空）：那会把门厅换成一张「打不开」的错页，而横幅已经在说这件事了。
+  if (last && app.info) setCurrent(last);
   // Light polling as a safety net: /sessions never activates anything, so it is cheap and side-effect free.
   setInterval(() => { if (app.core.state === "open" && !document.hidden) refreshSessions(); }, 15000);
   setInterval(renderStatus, 5000);

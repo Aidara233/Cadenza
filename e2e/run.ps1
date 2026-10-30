@@ -8,7 +8,7 @@
 
 param(
     [string]$CoreExe = "",
-    [string[]]$Scripts = @("1-boot", "2-flow", "3-asks-axes", "4-views-layout", "6-mixer-fit", "7-sync", "8-search", "9-network", "10-goal", "11-shell", "12-provider-timeout", "13-subagents", "14-jobs"),
+    [string[]]$Scripts = @("1-boot", "2-flow", "3-asks-axes", "4-views-layout", "6-mixer-fit", "7-sync", "8-search", "9-network", "10-goal", "11-shell", "12-provider-timeout", "13-subagents", "14-jobs", "15-archive"),
     [string]$Work = (Join-Path $env:TEMP "cadenza-e2e")
 )
 $ErrorActionPreference = "Stop"

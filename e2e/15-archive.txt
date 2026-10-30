@@ -1,0 +1,37 @@
+# 归档的**拉法**（核心 `b1d6df9` 之后：`GET /sessions` 只给未归档，归档那份走 `GET /sessions/archived`）
+#
+# ⚠️ 这一条要**真核心**：验的正是核心那两个端点怎么分工，假数据验不出来（13 那一条用假核心
+# 验的是渲染与请求形状）。所以它跟着 `run.ps1` 那套隔离核心跑，不自己起核心。
+# ⚠️ 每个 step 必须**一行**（cdp.cs 按行读，多行 eval 会被截成半句）。
+# ⚠️ 断言只谈这一条自己造的那一场会话（前面几条脚本会留下会话，数行数没有意义）。
+goto http://127.0.0.1:17994/?core=http://127.0.0.1:17989
+until !!window.cadenza && document.querySelector('#conn').dataset.state === 'open' ;; 15000
+logs
+# 造一场会话（不调模型，不花 token）：核心要有提供商才肯建会话
+eval (async () => { const ack = await cadenza.core.command({ kind: 'provider.upsert', id: 'mock', apiKey: 'sk-test', model: 'mock-flash', protocol: 'openai-chat', endpoint: 'http://127.0.0.1:15799' }); return ack.accepted + ':' + (ack.reason || ''); })()
+eval (async () => { const ack = await cadenza.core.command({ kind: 'session.create', title: '归档探针' }); window.__sid = ack.sessionId || ''; return ack.accepted + ':' + (ack.sessionId || ack.reason || ''); })()
+until (window.__sid || '').length > 8 ;; 15000
+eval (async () => { await (await import('./js/model.js')).refreshSessions(); return !!cadenza.sessions.get(window.__sid); })()
+# 未归档的：在 /sessions 里、没有 archivedAt、节目单上不是「已归档」
+expect !!cadenza.sessions.get(window.__sid)
+expect !cadenza.sessions.get(window.__sid)?.archivedAt
+expect [...document.querySelectorAll('.prog-row.archived')].every(b => !b.title.includes(window.__sid))
+# 归档 ⇒ 核心级联停、记录保留；**新的 /sessions 里就没有它了**
+eval (async () => { const ack = await cadenza.core.command({ kind: 'session.archive', sessionId: window.__sid, archived: true }); await (await import('./js/model.js')).refreshSessions(); return ack.accepted; })()
+until !cadenza.sessions.get(window.__sid) ;; 15000
+expect [...document.querySelectorAll('.prog-row')].every(b => !b.title.includes(window.__sid))
+# 勾上「显示已归档」才会去拉 /sessions/archived；那一条带着核心给的 archivedAt 回来
+eval document.querySelector('.prog-arch input').click()
+until !!(cadenza.sessions.get(window.__sid) || {}).archivedAt ;; 15000
+expect [...document.querySelectorAll('.prog-row.archived')].some(b => b.title.includes(window.__sid))
+# 再取消勾选：归档的又不在内存里了——这正是「对话框里没有它、但它还在」的那一刻
+eval document.querySelector('.prog-arch input').click()
+until !cadenza.sessions.get(window.__sid) ;; 15000
+# 打开一条不在 /sessions 里的会话：行由 `/state` 快照补（`seedRowFromSnapshot`），头部认得「已归档」
+eval (async () => { (await import('./js/model.js')).setCurrent(window.__sid); return 1; })()
+until !!document.querySelector('.score-h .sh-meta') ;; 15000
+expect /已归档/.test(document.querySelector('.sh-meta')?.textContent || '')
+expect cadenza.sessions.get(window.__sid)?.sessionId === window.__sid
+# 收尾：删掉探针会话，别把垃圾留在隔离数据根里
+eval (async () => { const ack = await cadenza.core.command({ kind: 'session.delete', sessionId: window.__sid }); cadenza.current = null; return ack.accepted; })()
+logs

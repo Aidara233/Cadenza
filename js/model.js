@@ -13,7 +13,13 @@ export const app = {
   network: null,              // GET /network-config（核心没有这个端点时为 null）
   shell: null,                // GET /shell-config（核心没有这个端点时为 null）
   presets: [],                // parsed from preset.list note
-  sessions: new Map(),        // sessionId -> row from GET /sessions (+ local hints)
+  sessions: new Map(),        // sessionId -> row from GET /sessions (+ /sessions/archived 勾着时) + local hints
+  // 归档会话的 id。核心 2026-10-29 起把归档那份从 `/sessions` 里摘了出去 ⇒ 这里存的是
+  // 「本机认为哪几条已归档」：新核心的行自带 `archivedAt`（对账见 refreshSessions），
+  // 旧核心只有这一份，另外还兼任「刚归档、还没刷新到」的乐观标记。
+  archived: new Set(store.get("archived", [])),
+  showArchived: store.get("showArchived", false),  // 节目单要不要拉并画出归档会话
+  archivedError: null,        // 上一次拉 /sessions/archived 的失败原因（404 不算：那是旧核心）
   projects: new Map(),        // pk -> { pk, dir }
   approvals: new Map(),       // askId -> { sessionId, askId, askKind, items, remember, deadlineAt, toolName, partial }
   current: null,              // open sessionId
@@ -80,17 +86,70 @@ export async function refreshPresets() {
   return app.presets;
 }
 
-/** GET /sessions — no side effects, safe to poll. Live events newer than the fetch win over it. */
+// ---------------- 归档会话 ----------------
+// 核心 2026-10-29 起换了这个的拉法：`GET /sessions` 只回答**未归档**的那些，归档那份单独走
+// `GET /sessions/archived`（行形状逐字相同，`ArchivedAt` 有值）。
+//
+// ⚠️ 所以「一个端点拿全 + 本地过滤」的旧写法在新核心上会**一条归档都画不出来**：过滤逻辑还在，
+// 但那些行根本不在列表里。⇒ 默认仍然只拉未归档（首屏与 15 秒轮询不背归档那一坨），
+// 勾上「显示已归档」才多打一次那个端点。
+// ⚠️ 旧核心没有 `/sessions/archived`（404）且归档的仍混在 `/sessions` 里 ⇒ 404 按旧行为退回，
+// 不当事、不报错。
+export function markArchived(id, on) {
+  if (!id) return;
+  if (app.archived.has(id) === !!on) return;
+  if (on) app.archived.add(id); else app.archived.delete(id);
+  store.set("archived", [...app.archived]);
+}
+export const isArchived = (id) => app.archived.has(id);
+
+/** 归档那一份。读不出来只影响归档视图，不该把活动会话的列表一起拖下水。 */
+async function fetchArchivedRows() {
+  try {
+    const rows = await app.core.get("/sessions/archived");
+    return Array.isArray(rows) ? rows : [];
+  } catch (error) {
+    // 404 = 这个核心还没有这个端点（归档的仍在 `/sessions` 里），不是错。
+    if (error?.status !== 404) app.archivedError = error?.message || "读不出来";
+    return [];
+  }
+}
+
+/**
+ * 「显示已归档」开关。**拉取跟着它走**：关着就一条归档的都不请求，打开时补一次。
+ * 拉不到（真出错，不是旧核心的 404）就把开关拨回去——勾上了却一条都画不出来是个谎。
+ */
+export async function setShowArchived(on) {
+  on = !!on;
+  if (app.showArchived === on) return;
+  app.showArchived = on;
+  store.set("showArchived", on);
+  app.archivedError = null;
+  app.bus.emit("sessions");
+  await refreshSessions();
+  if (on && app.archivedError) {
+    const why = app.archivedError;
+    app.archivedError = null;
+    app.showArchived = false;
+    store.set("showArchived", false);
+    app.bus.emit("sessions");
+    toast("归档会话读取失败：" + why, "err", 6000);
+  }
+}
+
+/** GET /sessions（+ 勾着时的 /sessions/archived）— 两个都不激活会话，可轮询。 */
 export async function refreshSessions() {
   const started = Date.now();
   let rows, pks;
   try { [rows, pks] = await Promise.all([app.core.get("/sessions"), app.core.get("/projects")]); }
   catch { return; }
+  const all = Array.isArray(rows) ? rows.slice() : [];
+  if (app.showArchived) all.push(...await fetchArchivedRows());
   const seen = new Set();
-  for (const r of rows) {
+  for (const r of all) {
     seen.add(r.sessionId);
     const prev = app.sessions.get(r.sessionId);
-    const next = { ...prev, ...r, title: r.title, ask: r.ask?.askId ? r.ask : null };
+    const next = { ...prev, ...r, title: r.title, ask: r.ask?.askId ? r.ask : null, archivedAt: r.archivedAt || null };
     // 子会话关系来自快照；核心字段可能在旧构建中缺省，缺省时保留已知关系。
     if (prev?.parentSessionId && !("parentSessionId" in r)) next.parentSessionId = prev.parentSessionId;
     // /sessions 不携带前端的持续时间字段；快照合并必须保留，否则 15 秒轮询会把运行计时冲掉。
@@ -105,8 +164,14 @@ export async function refreshSessions() {
       next.retry = null; next.stepAt = null;
     }
     app.sessions.set(r.sessionId, next);
+    // 行说它归档了 ⇒ 记进本地那份；说没归档 ⇒ 忘掉。这是归档/取消归档（可能是别的窗口干的）
+    // 唯一会对账的地方：行的 `ArchivedAt` 是核心关于这一条的事实。
+    markArchived(r.sessionId, !!r.archivedAt);
   }
-  for (const id of [...app.sessions.keys()]) if (!seen.has(id)) app.sessions.delete(id);
+  // ⚠️ 归档的在新契约里不在 `/sessions` 里 ⇒「没出现在列表里」不再等于「它没了」。
+  // 正在打开的那一场必须留着，否则一取消勾选、或者 15 秒那一轮轮询，头部就按「没有这一行」画
+  // （相位、运行计时、子会话关系全掉）。真被删掉的会话，`current` 早被 `del()` 清空了。
+  for (const id of [...app.sessions.keys()]) if (!seen.has(id) && id !== app.current) app.sessions.delete(id);
   for (const pk of pks) if (!app.projects.has(pk)) app.projects.set(pk, { pk, dir: dirs[pk] || null });
   for (const pk of [...app.projects.keys()]) if (!pks.includes(pk)) app.projects.delete(pk);
 
@@ -302,6 +367,36 @@ export function markLocal(id, patch) {
   if (!r) return;
   Object.assign(r, patch, { liveAt: Date.now() });
   app.bus.emit("sessions");
+}
+
+/**
+ * 从 `/state` 快照补一行。**归档会话不在 `/sessions` 里的那个洞由它填**：节目单与头部要的
+ * 是「这是哪一场、归哪个项目、父子关系、在不在等」，而这些 `/state` 逐格都有。
+ * 只在真的缺这一行时调用（`open()` 打开一条没列出来的会话时）。
+ */
+export function seedRowFromSnapshot(id, snap) {
+  const spec = snap?.spec || {};
+  const state = snap?.state || {};
+  const prev = app.sessions.get(id);
+  const archivedAt = spec.archivedAt || null;
+  const row = {
+    ...prev,
+    sessionId: id,
+    projectKey: spec.projectKey || prev?.projectKey || "",
+    title: spec.title || prev?.title || "",
+    parentSessionId: spec.parentSessionId || prev?.parentSessionId || "",
+    status: state.status || prev?.status || "Idle",
+    turn: state.turn ?? prev?.turn ?? 0,
+    ask: snap?.ask?.askId ? { askId: snap.ask.askId, kind: snap.ask.kind, deadlineAt: snap.ask.deadlineAt } : null,
+    archivedAt,
+    liveAt: Date.now(),
+  };
+  app.sessions.set(id, row);
+  markArchived(id, !!archivedAt);
+  const pk = row.projectKey;
+  if (pk && !app.projects.has(pk)) app.projects.set(pk, { pk, dir: dirs[pk] || null });
+  app.bus.emit("sessions");
+  return row;
 }
 
 export const isRunning = (id) => app.sessions.get(id)?.status === "Running";
