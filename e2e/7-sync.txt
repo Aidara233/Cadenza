@@ -14,25 +14,25 @@ shot 23-retrying
 until document.querySelector('.perf').hidden ;; 10000
 expect document.querySelectorAll('.note-retry').length === 1
 expect /2 \/ 10/.test(document.querySelector('.note-retry').textContent)
-expect !window.__row(window.__A).classList.contains('retrying') && !window.__row(window.__A).classList.contains('st-run')
+expect !window.__row(window.__A).classList.contains('retrying') && !window.__row(window.__A).classList.contains('st-gen')
 # interrupt during retry backoff: perf, stop button, row and head come to rest together
 eval window.__say('overload now')
 until document.querySelector('.perf').classList.contains('retrying') ;; 6000
 eval document.querySelector('.composer-stop').click()
 until document.querySelector('.perf').hidden ;; 6000
 expect document.querySelector('.composer-stop').hidden
-expect !window.__row(window.__A).classList.contains('st-run') && !window.__row(window.__A).classList.contains('retrying')
-expect !document.querySelector('.sh-status').classList.contains('st-run')
+expect !window.__row(window.__A).classList.contains('st-gen') && !window.__row(window.__A).classList.contains('retrying')
+expect !document.querySelector('.sh-status').classList.contains('st-gen')
 wait 1500
-expect document.querySelector('.perf').hidden && !window.__row(window.__A).classList.contains('st-run')
+expect document.querySelector('.perf').hidden && !window.__row(window.__A).classList.contains('st-gen')
 # non-transient failure: only an `error` event (no session.state) — everything must still stop
 eval window.__say('please fail now')
 until document.querySelectorAll('.note-error').length >= 1 ;; 8000
 expect document.querySelector('.perf').hidden && document.querySelector('.composer-stop').hidden
-expect !window.__row(window.__A).classList.contains('st-run') && window.__row(window.__A).classList.contains('errored')
-expect !document.querySelector('.sh-status').classList.contains('st-run')
+expect !window.__row(window.__A).classList.contains('st-gen') && window.__row(window.__A).classList.contains('errored')
+expect !document.querySelector('.sh-status').classList.contains('st-gen')
 wait 1200
-expect !window.__row(window.__A).classList.contains('st-run')
+expect !window.__row(window.__A).classList.contains('st-gen')
 shot 25-error-rest
 # ask cancelled from the cue: no session.state follows — the row must leave 𝄐 anyway
 eval window.__say('请 ask 我几个问题')
@@ -43,25 +43,26 @@ until !document.querySelector('.cue') ;; 6000
 until !window.__row(window.__A).classList.contains('st-wait') ;; 3000
 wait 1500
 expect !window.__row(window.__A).classList.contains('st-wait') && document.querySelector('#cue-btn').hidden
-expect !document.querySelector('.sh-status').classList.contains('st-wait') && !document.querySelector('.sh-status').classList.contains('st-run')
+expect !document.querySelector('.sh-status').classList.contains('st-wait') && !document.querySelector('.sh-status').classList.contains('st-gen')
 # a session that is NOT open: its row follows its own stream, without a reload
 eval (async () => { const a = await cadenza.core.command({ kind: 'session.create', title: '后台乐章' }); window.__B = a.sessionId; return a.accepted + ' ' + a.sessionId; })()
 until !!window.__row(window.__B) ;; 6000
+until cadenza.core.topics.has('session:' + window.__B) ;; 6000
 wait 800
 eval (async () => (await cadenza.core.command({ kind: 'session.send', sessionId: window.__B, blocks: [{ kind: 'text', text: 'slow please' }] })).accepted)()
-until window.__row(window.__B).classList.contains('st-run') ;; 4000
-expect document.querySelector('.perf').hidden && !window.__row(window.__A).classList.contains('st-run')
+until window.__row(window.__B).classList.contains('st-gen') ;; 4000
+expect document.querySelector('.perf').hidden && !window.__row(window.__A).classList.contains('st-gen')
 shot 24-background-running
-until !window.__row(window.__B).classList.contains('st-run') ;; 12000
+until !window.__row(window.__B).classList.contains('st-gen') ;; 12000
 eval (async () => (await cadenza.core.command({ kind: 'session.send', sessionId: window.__B, blocks: [{ kind: 'text', text: 'please fail now' }] })).accepted)()
 until window.__row(window.__B).classList.contains('errored') ;; 6000
-expect !window.__row(window.__B).classList.contains('st-run')
+expect !window.__row(window.__B).classList.contains('st-gen')
 expect [...document.querySelectorAll('.toast')].some(t => t.textContent.includes('出错了'))
 eval (async () => (await cadenza.core.command({ kind: 'session.send', sessionId: window.__B, blocks: [{ kind: 'text', text: 'overload now' }] })).accepted)()
 until window.__row(window.__B).classList.contains('retrying') ;; 6000
 expect /重奏/.test(window.__row(window.__B).textContent)
 eval (async () => (await cadenza.core.command({ kind: 'session.interrupt', sessionId: window.__B })).accepted)()
-until !window.__row(window.__B).classList.contains('st-run') && !window.__row(window.__B).classList.contains('retrying') ;; 6000
+until !window.__row(window.__B).classList.contains('st-gen') && !window.__row(window.__B).classList.contains('retrying') ;; 6000
 eval (async () => (await cadenza.core.command({ kind: 'session.send', sessionId: window.__B, blocks: [{ kind: 'text', text: '请 write 一个文件' }] })).accepted)()
 until window.__row(window.__B).classList.contains('st-wait') && !document.querySelector('#cue-btn').hidden ;; 8000
 eval (async () => { const a = [...cadenza.approvals.values()].find(x => x.sessionId === window.__B); return (await cadenza.core.command({ kind: 'approval.respond', sessionId: window.__B, askId: a.askId, outcome: 'cancel' })).accepted; })()

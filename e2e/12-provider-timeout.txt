@@ -50,7 +50,7 @@ until !!document.querySelector('.prog-row') ;; 8000
 eval window.__A = [...cadenza.sessions.keys()][0]; window.__row = (id) => [...document.querySelectorAll('.prog-row')].find(b => b.title.startsWith(id)); window.__say = (t) => { const i = document.querySelector('.composer-inp'); i.value = t; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; }; window.__A
 eval window.__row(window.__A).click()
 until !!document.querySelector('.ax-initiative .seg-b') ;; 8000
-until !window.__row(window.__A).classList.contains('st-run') ;; 5000
+until !window.__row(window.__A).classList.contains('st-gen') ;; 5000
 eval window.__say('slow please')
 # 2 秒就该被掐断一次 ⇒ retry.attempt 到来；附注里带上这一格的当前值。
 until !!document.querySelector('.note-retry') ;; 20000
@@ -60,7 +60,7 @@ shot 51-timeout-retry
 # ⑦ 中断：立刻停，且**不**留下「超时」那句（取消不是超时）
 eval document.querySelector('.composer-stop').click()
 wait 2000
-expect !window.__row(window.__A).classList.contains('st-run')
+expect !window.__row(window.__A).classList.contains('st-gen')
 expect !document.querySelector('.note-error')
 
 # 收尾：留一个宽松的值给后面可能再跑的脚本（核心没有「清回默认」的入口，只能改大）。

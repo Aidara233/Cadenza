@@ -23,7 +23,7 @@ eval window.__say('请联网查一下')
 until !!document.querySelector('.toolcall[data-tool="web_search"]') ;; 12000
 until document.querySelector('.toolcall[data-tool="web_search"]').classList.contains('done') ;; 12000
 expect /README 示例/.test(document.querySelector('.toolcall[data-tool="web_search"] .tc-result').textContent)
-until !window.__row(window.__A).classList.contains('st-run') ;; 10000
+until !window.__row(window.__A).classList.contains('st-gen') ;; 10000
 shot 31-web-search
 eval [...document.querySelectorAll('.ax-network .seg-b')].find(b => b.textContent.trim() === 'off').click()
 until document.querySelector('.ax-network .ax-val').textContent === 'off' ;; 4000

@@ -60,7 +60,7 @@ expect /已经结束/.test(document.querySelector('.toolcall[data-tool="job_outp
 shot 53-jobs-report
 
 ;; ---- ⑦ 模型自己盘点任务表：`jobs` 卡列出同一个 id ----
-until !window.__row(window.__J).classList.contains('st-run') ;; 20000
+until !window.__row(window.__J).classList.contains('st-gen') ;; 20000
 wait 400
 eval window.__say('盘点任务')
 until !!document.querySelector('.toolcall[data-tool="jobs"]') ;; 20000
@@ -71,7 +71,7 @@ shot 54-jobs-tool
 
 ;; ---- ⑧ `wait(task=…)` 的卡片：摘要里给的是任务 id，结果是「等到了」那一句 ----
 ;; 任务此时已经停了，所以这次 wait 立刻返回——这一步验的是卡片与配对，不是等待本身。
-until !window.__row(window.__J).classList.contains('st-run') ;; 20000
+until !window.__row(window.__J).classList.contains('st-gen') ;; 20000
 wait 400
 eval window.__say('等它跑完')
 until !!document.querySelector('.toolcall[data-tool="wait"]') ;; 20000

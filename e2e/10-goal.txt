@@ -27,7 +27,7 @@ eval document.querySelector('.composer-stop').click()
 until document.querySelector('.perf').hidden ;; 6000
 wait 2500
 expect document.querySelector('.ax-initiative .ax-val').textContent === 'goal'
-expect !window.__row(window.__A).classList.contains('st-run')
+expect !window.__row(window.__A).classList.contains('st-gen')
 expect !window.__row(window.__A).classList.contains('retrying')
 shot 35-goal-interrupted
 eval [...document.querySelectorAll('.ax-initiative .seg-b')].find(b => b.textContent.trim() === 'standard').click()

@@ -45,19 +45,19 @@ eval window.__say('请跑命令看看')
 until !!document.querySelector('.toolcall[data-tool="shell"]') ;; 12000
 until document.querySelector('.toolcall[data-tool="shell"]').classList.contains('done') ;; 12000
 expect /mock-shell-ok/.test(document.querySelector('.toolcall[data-tool="shell"] .tc-result').textContent)
-until !window.__row(window.__B).classList.contains('st-run') ;; 10000
+until !window.__row(window.__B).classList.contains('st-gen') ;; 10000
 shot 42-shell-ran
 
 ;; ---- ③ 中断：命令跑不完（`shell-finished.txt` 不该出现在盘上，见 README 的手工核对）----
 ;; ⚠️ 发之前先等会话**空闲**：往一个正在跑的会话里发是「排队」，而排队的排空是另一条路径。
-until !window.__row(window.__B).classList.contains('st-run') ;; 4000
+until !window.__row(window.__B).classList.contains('st-gen') ;; 4000
 eval window.__say('长命令')
-until window.__row(window.__B).classList.contains('st-run') ;; 12000
+until window.__row(window.__B).classList.contains('st-gen') ;; 12000
 wait 1200
 eval document.querySelector('.composer-stop').click()
 until !!document.querySelector('.note-interrupt') ;; 8000
 wait 5000
-expect !window.__row(window.__B).classList.contains('st-run')
+expect !window.__row(window.__B).classList.contains('st-gen')
 shot 43-shell-interrupted
 
 ;; Put the session back so later scripts (if run after this one) start from the default tier.
