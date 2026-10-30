@@ -8,6 +8,7 @@ import { mountLedger, ledgerShown } from "./ledger.js";
 import { mountGreenRoom, greenRoomShown } from "./greenroom.js";
 import { mountViz } from "./viz.js";
 import { openPalette } from "./palette.js";
+import { setCoreBase } from "./blocks.js";
 
 const VIEWS = ["stage", "score", "ledger", "greenroom"];
 const VERSION = "1.0.0";
@@ -15,6 +16,8 @@ const ON_SHOW = { score: scoreShown, ledger: ledgerShown, greenroom: greenRoomSh
 
 async function boot() {
   const base = await resolveCoreBase();
+  // 图片的字节按 `GET /store/{sha256}` 去取，而 `blocks.js` 不能 import 这里（循环）。
+  setCoreBase(base);
   app.core = new Core(base);
   window.cadenza = app; // for console poking; not an API
 

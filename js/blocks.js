@@ -156,13 +156,52 @@ function codeView(content, path) {
   return h("figure.code", h("figcaption", h("span", ext)), h("pre", h("code", content)));
 }
 
+// ---- 库的两个端点（核心 2026-10-29 那批） ----
+//
+// ⚠️ 图片块的记录里**只有地址**（`ImageBlock(sha256, mediaType)`），字节住核心的库里，
+// 要按 `GET /store/{sha256}` 去取（`03` §9.4）。⇒ 这里必须知道核心在哪。
+// ⚠️ 这里**只存一个字符串**，由 `app.js` 解析完核心地址之后塞进来：让 `blocks.js`
+// 去 import `app.js` 会绕出一条 app → stage → blocks 的循环。
+let coreBase = "";
+
+/** 核心地址（不带尾斜杠）。`app.js` 在 boot 时调一次。 */
+export function setCoreBase(base) { coreBase = (base || "").replace(/\/+$/, ""); }
+
+const storeUrl = (sha) => `${coreBase}/store/${encodeURIComponent(sha || "")}`;
+
 export function storeBlock(b) {
+  // ⚠️ **图片显示的是那张图本身**：核心的 `GET /store/{sha256}` 就是为这一格开的
+  // （2026-10-29 之前这里写的是「核心还没有 /store 端点」）。
+  if (b.kind === "image") {
+    const img = h("img.obj-img", { src: storeUrl(b.sha256), alt: "图片", loading: "lazy", decoding: "async" });
+    const box = h("figure.obj-imgbox",
+      img,
+      h("figcaption.dim.mono", `${b.mediaType || "?"} · ${(b.sha256 || "").slice(0, 12)}…`));
+
+    // ⚠️ **取不回来必须说出来**：库对象会随 GC 消失（`Reclaim`），那时 `<img>` 只会是
+    // 一个空框——而空框看起来像「这张图本来就是空的」，不像「它没了」。
+    img.addEventListener("error", () => {
+      box.replaceChildren(h("div.objref",
+        h("span.or-glyph", { "aria-hidden": "true" }, "▧"),
+        h("div",
+          h("div", "图片取不回来"),
+          h("div.dim.mono", (b.sha256 || "").slice(0, 24) + "…"),
+          h("div.dim", "核心的库里没有这串字节（被回收了，或者换了 dataRoot）"))));
+    });
+
+    return box;
+  }
+
+  // `store`：块数组 / 原始文本那种库对象——头**不解引用**（那是核心渲染期的事），
+  // 只给一条能自己去看的路。
   return h("div.objref",
-    h("span.or-glyph", { "aria-hidden": "true" }, b.kind === "image" ? "▧" : "▤"),
+    h("span.or-glyph", { "aria-hidden": "true" }, "▤"),
     h("div",
-      h("div", b.kind === "image" ? "图片" : "库对象", " · ", h("code", b.mediaType || "?")),
+      h("div", "库对象", " · ", h("code", b.mediaType || "?")),
       h("div.dim.mono", (b.sha256 || "").slice(0, 24) + "…"),
-      h("div.dim", "核心还没有 /store 端点，取不到内容")));
+      coreBase
+        ? h("div.dim", h("a", { href: storeUrl(b.sha256), target: "_blank", rel: "noreferrer" }, "在核心的库里打开 ↗"))
+        : h("div.dim", "还没连上核心，取不到内容")));
 }
 
 export function renderBlock(b) {

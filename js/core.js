@@ -85,6 +85,29 @@ export class Core extends Emitter {
     return data;
   }
 
+  /**
+   * POST **原始字节**（`/files`）。⚠️ 不是 JSON 那条 `put`：上传的 body 就是文件本身，
+   * `Content-Type` 就是它的媒体类型——核心按 magic 认类型、把字节存进库，回执是
+   * `{ ref, mediaType, bytes }`，而 `ref` 正是 `ImageBlock.sha256` 那一格。
+   *
+   * ⚠️ 上传**不走命令通道**（`03` §9.1）：大字节不该进可重放的命令流。
+   */
+  async postBytes(path, bytes, mediaType) {
+    let r;
+    try {
+      r = await fetch(this.base + path, {
+        method: "POST", cache: "no-store",
+        headers: { "content-type": mediaType },
+        body: bytes,
+      });
+    } catch (e) { throw new HttpError(0, { error: "核心没应答：" + e.message }, path); }
+    let data = null;
+    const text = await r.text();
+    if (text) { try { data = JSON.parse(text); } catch { data = { error: text }; } }
+    if (!r.ok) throw new HttpError(r.status, data, path);
+    return data;
+  }
+
   async probe() {
     try {
       this.info = await this.get("/info");

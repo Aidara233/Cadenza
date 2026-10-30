@@ -71,6 +71,28 @@ while (true)
         }
         var id = Interlocked.Increment(ref n);
         JsonObject message;
+        // ⚠️ **上一轮用户消息里有没有图**（`16-images` 靠这个证伪/证实）：
+        // 只认协议里那一格（`content` 数组里的 `image_url`），不猜「是不是刚上传过」——
+        // 判据必须是**上游真的收到了什么**，而不是头以为它发了什么。
+        // ⚠️ 位置在 `if/else if` 链**之前**：插进链中间会把链断开（C# 里那是语法错误）。
+        var hasImage = false;
+        var imageNote = "";
+        for (var k = msgs.Count - 1; k >= 0 && !hasImage; k--)
+        {
+            if ((string?)msgs[k]!["role"] != "user") continue;
+            if (msgs[k]!["content"] is not JsonArray parts) continue;
+            foreach (var p in parts)
+            {
+                if ((string?)p?["type"] != "image_url") continue;
+                var url = (string?)p!["image_url"]?["url"] ?? "";
+                hasImage = true;
+                imageNote = url.StartsWith("data:image/png;base64,")
+                    ? "PNG 的 data URL"
+                    : url.Length > 40 ? url[..40] + "…" : url;
+                break;
+            }
+        }
+
         if (role == "tool")
         {
             // goal 收尾：finish_goal 的结果里写着「目标收尾已记录」——回一段总结，让最后一步像真的收尾。
@@ -79,6 +101,11 @@ while (true)
                 ? Text("目标已完成。总结：长任务收尾，没有遗留项。", "目标已收，做一句总结。")
                 : Text("工具结果收到了。我看了一下：\n\n- 输出正常\n- 没有发现异常\n\n```csharp\nvar ok = true; // 示例代码\n```\n\n要继续吗？", "检查工具返回的内容，归纳结论。");
         }
+        // ⚠️ **上一轮用户消息里有没有图**（`16-images` 靠这个证伪/证实）：
+        // 只认协议里那一格（`content` 数组里的 `image_url`），不猜「是不是刚上传过」——
+        // 判据必须是**上游真的收到了什么**，而不是头以为它发了什么。
+        else if (hasImage)
+            message = Text($"看到图了：{imageNote}", "用户发了图，我看得到。");
         else if (content.Contains("ls"))
             message = Call("ls", "{\"path\":\".\"}", "用户想看目录，调 ls。");
         else if (content.Contains("write"))

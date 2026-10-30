@@ -1,5 +1,5 @@
 // Cadenza · stage — the session view: programme (sidebar) · score (timeline) · mixer (inspector).
-import { h, $, swap, clear, fmtTime, fmtAgo, fmtTokens, fmtNum, fmtDur, store, toast, confirmDlg, modal, debounce, copy, jsonBlock, baseName } from "./util.js";
+import { h, $, swap, clear, uid, fmtTime, fmtAgo, fmtTokens, fmtNum, fmtDur, store, toast, confirmDlg, modal, debounce, copy, jsonBlock, baseName } from "./util.js";
 import { app, cmd, titleOf, projectLabel, dirOf, rememberDir, setCurrent, refreshSessions, refreshPresets, refreshProviders, scheduleRefresh, watchSession, unwatchSession, markLocal, phaseOf, seedRowFromSnapshot, setShowArchived, isArchived as isArchivedInModel, markArchived as markArchivedInModel } from "./model.js";
 import { bobDelay, applyBob, onBob } from "./beat.js";
 import { Timeline } from "./timeline.js";
@@ -53,8 +53,45 @@ export function mountStage(root) {
   S.sendBtn = h("button.btn.btn-primary.composer-send", { type: "button", onclick: () => send(), "aria-label": "发送" }, "发送 ↵");
   S.stopBtn = h("button.btn.btn-danger.composer-stop", { type: "button", onclick: () => interrupt(), hidden: true, "aria-label": "中断" }, "■ 中断");
   S.qInfo = h("span.composer-q.dim");
-  S.composer = h("div.composer",
-    h("div.composer-box", S.input, h("div.composer-actions", S.qInfo, h("span.sp"), S.stopBtn, S.sendBtn)));
+
+  // ---- 附件（图片）----
+  //
+  // ⚠️ 核心那边是**两步**（`03` §9.1）：先 `POST /files` 把字节放进库、拿到 `ref`，
+  // 再在 `session.send` 里发一个 `{kind:"image", sha256: ref, mediaType}`。头**不发明**
+  // 第三种形状——核心的入口校验只认「地址在库里」的那种图片块。
+  S.files = [];                                   // { id, file, type, url }
+  S.filesRow = h("div.composer-files", { hidden: true });
+  S.fileInput = h("input", { type: "file", accept: "image/*", multiple: true, hidden: true });
+  S.fileInput.addEventListener("change", () => { addFiles([...S.fileInput.files]); S.fileInput.value = ""; });
+  S.attachBtn = h("button.btn.btn-ghost.btn-sm.composer-attach", {
+    type: "button", title: "加一张图（也可以直接粘贴 / 拖进来）", onclick: () => S.fileInput.click(),
+    "aria-label": "添加图片",
+  }, "＋ 图");
+
+  // 粘贴：剪贴板里是图就直接吃下来（`⌘V` 一张截图是这个界面最常用的入口）。
+  S.input.addEventListener("paste", (e) => {
+    const files = [...(e.clipboardData?.files || [])];
+    if (files.length) { e.preventDefault(); addFiles(files); }
+  });
+
+  // 拖放：整块输入区当投放目标。
+  S.composer = h("div.composer");
+  S.composer.addEventListener("dragover", (e) => {
+    if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
+    e.preventDefault(); S.composer.classList.add("dropping");
+  });
+  S.composer.addEventListener("dragleave", () => S.composer.classList.remove("dropping"));
+  S.composer.addEventListener("drop", (e) => {
+    const files = [...(e.dataTransfer?.files || [])];
+    if (!files.length) return;
+    e.preventDefault(); S.composer.classList.remove("dropping"); addFiles(files);
+  });
+
+  S.composer.append(h("div.composer-box",
+    S.filesRow,
+    S.input,
+    h("div.composer-actions", S.qInfo, h("span.sp"), S.attachBtn, S.stopBtn, S.sendBtn),
+    S.fileInput));
 
   const center = h("section.score", { "aria-label": "总谱" }, S.head, S.tlRoot, S.perf, S.cues, S.composer);
   S.mixRoot = h("aside.mixer", { "aria-label": "调音台" });
@@ -491,6 +528,8 @@ async function open(id) {
   swap(S.tlRoot, h("div.tl-loading", h("div.tll-bars", h("i"), h("i"), h("i"), h("i")), h("span", "调音中…")));
   clear(S.cues);
   S.composer.hidden = false;
+  // ⚠️ 换会话时**丢掉**没发出去的附件：它们属于刚才那次发送的意图（草稿是文字，附件不是）。
+  clearFiles();
   S.input.value = store.get("draft." + id, "");
   autosize();
 
@@ -1010,23 +1049,85 @@ function syncComposer() {
     : "";
 }
 
+// ---- 附件：加、画、清 ----
+//
+// ⚠️ **上限与核心那条同数**（`ControlServer.MaxUploadBytes` 32 MiB）：在这里先拒，
+// 是因为「传了 200 MB 才被 413」纯属浪费用户的上行带宽——而 413 那句话他还要再读一遍。
+const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
+
+function addFiles(files) {
+  const room = files.filter((f) => {
+    if (!f.type.startsWith("image/")) { toast(`「${f.name || "粘贴的内容"}」不是图片（${f.type || "未知类型"}）`, "err"); return false; }
+    if (f.size > MAX_IMAGE_BYTES) { toast(`「${f.name}」有 ${fmtNum(f.size)} 字节，超过 ${MAX_IMAGE_BYTES / 1048576} MiB 上限`, "err"); return false; }
+    return true;
+  });
+  for (const f of room) S.files.push({ id: uid(), file: f, type: f.type, url: URL.createObjectURL(f) });
+  renderFiles();
+  if (room.length) S.input.focus();
+}
+
+function renderFiles() {
+  S.filesRow.hidden = S.files.length === 0;
+  S.filesRow.replaceChildren(
+    h("span.composer-files-label.eyebrow", `附件 ${S.files.length}`),
+    ...S.files.map((f) => h("div.composer-chip", { title: f.file.name || f.type },
+      h("img", { src: f.url, alt: "" }),
+      h("span.chip-name", f.file.name || "粘贴的图"),
+      h("button.chip-x", {
+        type: "button", "aria-label": "移除", onclick: () => {
+          URL.revokeObjectURL(f.url);
+          S.files = S.files.filter((x) => x.id !== f.id);
+          renderFiles();
+        },
+      }, "×"))));
+}
+
+function clearFiles() {
+  for (const f of S.files) URL.revokeObjectURL(f.url);
+  S.files = [];
+  renderFiles();
+}
+
+/**
+ * 发出去。⚠️ **一条消息 = 一串块**（`01` §3.6）：文本一块、每张图一块，顺序就是用户看到的顺序。
+ * ⚠️ 图片先上传再发（核心只认库里已有的地址）；任何一步失败都**不发**——
+ * 发一条少了图的消息比不发更糟（模型会以为你只说了那句话）。
+ */
 async function send() {
   const text = S.input.value.trim();
   const id = app.current;
-  if (!text || !id) return;
+  if ((!text && S.files.length === 0) || !id) return;
   const waiting = [...app.approvals.values()].find((a) => a.sessionId === id);
   if (waiting) {
     const ok = await confirmDlg({ title: "顶替这次询问？", body: "它还在等你回答。直接发新消息会把那次询问作废（模型会看到「用户没回答，说了别的」）。", ok: "照发" });
     if (!ok) return;
   }
+
   S.sendBtn.disabled = true;
-  const ack = await cmd({ kind: "session.send", sessionId: id, blocks: [{ kind: "text", text }] }, { quiet: true });
-  S.sendBtn.disabled = false;
-  if (ack.accepted) {
-    S.input.value = "";
-    store.del("draft." + id);
-    autosize();
-    S.tl?.scrollEnd();
+  try {
+    const blocks = [];
+    if (text) blocks.push({ kind: "text", text });
+
+    for (const f of S.files) {
+      // ⚠️ `file` 直接当 body 发（Blob 就是字节），`Content-Type` 用**浏览器的判断**：
+      // 核心会再按 magic 认一次，两处不一致时以核心为准（它回执里的 mediaType）。
+      let receipt;
+      try { receipt = await app.core.postBytes("/files", f.file, f.type); }
+      catch (e) { toast("这张图没上传成功：" + (e.message || "核心拒绝了"), "err"); return; }
+
+      blocks.push({ kind: "image", sha256: receipt.ref, mediaType: receipt.mediaType || f.type });
+    }
+
+    const ack = await cmd({ kind: "session.send", sessionId: id, blocks }, { quiet: true });
+    if (ack.accepted) {
+      S.input.value = "";
+      clearFiles();
+      store.del("draft." + id);
+      autosize();
+      S.tl?.scrollEnd();
+    }
+  } finally {
+    S.sendBtn.disabled = false;
   }
 }
 

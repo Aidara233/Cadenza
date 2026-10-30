@@ -1,0 +1,45 @@
+# 图片（核心 2026-10-29 那批）：粘贴/选图 → POST /files → session.send 带 image 块
+# → 历史里渲染成真图（GET /store/{sha256}）→ 上游**真的收到** image_url。
+#
+# 判据三条，缺一条都不算通：
+#   ① 消息里那张图**解码成功**（naturalWidth === 2 ⇒ 字节从库里取回来了）；
+#   ② 发出去之后附件区清空（不能挂着"已发送"的残影）；
+#   ③ mock 上游在**上一轮 user 消息的 content 里看到了 image_url**（否则它不会这么回）。
+goto http://127.0.0.1:17994/#greenroom
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector(".prov-new")
+# 重置：删会话与提供商（这条脚本可以反复跑）
+eval (async () => { for (const r of await (await fetch("http://127.0.0.1:17989/sessions")).json()) await cadenza.core.command({ kind: "session.delete", sessionId: r.sessionId }); for (const p of cadenza.providers) await cadenza.core.command({ kind: "provider.delete", id: p.id }); location.reload(); return "reset"; })()
+wait 1500
+until !!document.querySelector(".prov-new")
+eval document.querySelector('.prov-new').click()
+wait 300
+eval (() => { const f = document.querySelector('dialog form'); const ins = f.querySelectorAll('input'); const set = (el, v) => { el.value = v; el.dispatchEvent(new Event('input')); }; set(ins[0], 'mock'); set(ins[1], 'sk-test'); set(ins[2], 'mock-flash'); set(ins[3], 'http://127.0.0.1:15799'); set(ins[4], 'mock-flash, mock-pro'); f.querySelectorAll('select')[0].value = 'openai-chat'; f.requestSubmit(); return 'ok'; })()
+until document.querySelectorAll('.prov-card:not(.prov-new)').length === 1
+eval [...document.querySelectorAll('.prov-card button')].find(b => b.textContent === '试音').click()
+until /✓|✗/.test(document.querySelector('.pt-r')?.textContent || '') ;; 15000
+expect /✓/.test(document.querySelector('.pt-r').textContent)
+eval location.hash = '#stage'
+wait 400
+eval document.querySelector('.prog-h .btn-primary').click()
+wait 500
+eval (() => { const f = document.querySelector('dialog form.newsess'); f.querySelectorAll('input')[0].value = '看图'; document.querySelector('dialog form.newsess .row .btn').click(); return 1; })()
+until document.querySelectorAll('.dirb-list li').length > 0
+eval document.querySelector('dialog form.newsess').requestSubmit()
+until document.querySelector('.sh-title')?.textContent === '看图'
+# ---- 这一条要验的：走**真的**输入区那条路（file input + change，与点「＋ 图」同一条）----
+eval (async () => { const c = document.createElement('canvas'); c.width = 2; c.height = 2; const g = c.getContext('2d'); g.fillStyle = '#c33'; g.fillRect(0, 0, 2, 2); const blob = await new Promise(r => c.toBlob(r, 'image/png')); const dt = new DataTransfer(); dt.items.add(new File([blob], 'dot.png', { type: 'image/png' })); const inp = document.querySelector('.composer input[type=file]'); inp.files = dt.files; inp.dispatchEvent(new Event('change')); return blob.size; })()
+until document.querySelectorAll('.composer-chip').length === 1
+expect document.querySelectorAll('.composer-chip img').length === 1
+eval (() => { const t = document.querySelector('.composer-inp'); t.value = '看清这张图'; t.dispatchEvent(new Event('input')); return 1; })()
+eval document.querySelector('.composer-send').click()
+# ① 历史里出现那张图，并且**字节真的解码出来了**（naturalWidth === 2 ⇒ /store 通）
+until !!document.querySelector('.msg.from-user .obj-img') ;; 20000
+until (() => { const i = document.querySelector('.msg.from-user .obj-img'); return !!i && i.complete && i.naturalWidth === 2; })() ;; 20000
+# ② 发出去之后附件区清空
+expect document.querySelectorAll('.composer-chip').length === 0
+# ③ 上游真的收到了：mock 只在「上一轮 user 消息里有 image_url」时才这么回
+until /看到图了/.test(document.querySelector('.from-model')?.textContent || '') ;; 20000
+expect /PNG 的 data URL/.test(document.querySelector('.from-model').textContent)
+shot 16-image
+logs
