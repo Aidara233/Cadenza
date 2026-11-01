@@ -1,0 +1,64 @@
+# 访问 token（核心 `LILARA_AUTH=1` 之后的那条路）
+#
+# ⚠️ 这一条要**真核心**，而且是**开了鉴权的那一个**：假核心验不出「交法对不对」——
+# token 只在核心的控制台启动横幅里，HTTP 走 `Authorization: Bearer`、WS 只能走 `?token=`，
+# 这两条只有真的核心会按那个规则判。
+# ⚠️ 所以它**不在默认脚本列表里**，也不跟别的脚本同批跑（那样别的脚本会全被 401）：
+#     powershell -NoProfile -ExecutionPolicy Bypass -File e2e\run.ps1 -Auth
+# `run.ps1 -Auth` 负责起那个核心、从启动横幅里抠出 token，再把下面这个 `@TOKEN@` 换掉。
+# ⚠️ 每个 step 必须**一行**（cdp.cs 按行读，多行 eval 会被截成半句）。
+goto http://127.0.0.1:17994/?core=http://127.0.0.1:17989
+logs
+# 没有 token：闸**自己出现**（`/info` 在未授权时照样回 200，只是带着 `authRequired`，
+# 所以这里不该等一次失败的请求去猜）
+until !!document.querySelector('#token-gate') ;; 15000
+shot 17-auth-gate
+expect document.querySelector('#conn').dataset.state !== 'open'
+expect /还没有 token/.test(document.querySelector('#token-gate .gate-bad')?.textContent || '')
+# 闸上说得清 token 在哪：核心的控制台启动横幅
+expect /访问 token/.test(document.querySelector('#token-gate')?.textContent || '')
+expect /LILARA_AUTH/.test(document.querySelector('#token-gate')?.textContent || '')
+# 状态栏也说了这件事（只在核心要 token 时才占这一格）
+expect /鉴权/.test(document.querySelector('#statusbar')?.textContent || '')
+# 错 token：重载后闸回来、这次说的是「token 不对」（与「还没有 token」分开说）
+eval (() => { localStorage.setItem('cadenza.token', JSON.stringify('definitely-not-the-token')); return 1; })()
+goto http://127.0.0.1:17994/?core=http://127.0.0.1:17989
+until !!document.querySelector('#token-gate') ;; 15000
+expect /token 不对/.test(document.querySelector('#token-gate .gate-bad')?.textContent || '')
+# ⚠️ 存着的那份错 token 被清掉了：留着它，闸上看起来就像「已经填过」，而用户不知道要换
+expect !localStorage.getItem('cadenza.token')
+# 粘对：走闸自己的输入框 + 保存（不是直接写 localStorage），然后整页重载并真的连上
+# ⚠️ 触发重载的 eval 一律**先返回、后点**（`setTimeout`）：让 evaluate 在导航之前拿到结果，
+# 否则那条 CDP 命令可能永远等不到响应，测试会以超时而不是断言失败的形式挂掉。
+eval (() => { const i = document.querySelector('#token-gate input'); i.value = '@TOKEN@'; setTimeout(() => document.querySelector('#token-gate form').requestSubmit(), 50); return 'submitted'; })()
+wait 300
+until !!window.cadenza && document.querySelector('#conn').dataset.state === 'open' ;; 25000
+expect !document.querySelector('#token-gate')
+expect localStorage.getItem('cadenza.token') === JSON.stringify('@TOKEN@')
+# 连上之后 HTTP 也通了：`/info` 这次给全（`dataRoot` 只在**带对** token 时才有），`/health` 也拉到了
+until !!cadenza.info?.dataRoot ;; 10000
+expect !!cadenza.info?.dataRoot
+expect !!cadenza.health?.ok
+# WS 的 token 在 URL 里（浏览器不能给 WebSocket 加请求头）——这是它连得上的唯一原因
+expect /[?&]token=/.test(cadenza.core.wsUrl)
+# 图片与库链接走的是查询参数：`<img src>` 没法带头，那一格只能这么交
+eval (async () => { const b = await import('./js/blocks.js'); const el = b.storeBlock({ kind: 'image', sha256: 'z'.repeat(64), mediaType: 'image/png' }); window.__img = el.querySelector('img')?.getAttribute('src') || 'no-img'; return window.__img; })()
+expect /[?&]token=@TOKEN@$/.test(window.__img || '')
+# 后台 → 系统页（点页签，不偷改 G.tab）：鉴权状态说「开」，并且有一格能换 token
+eval (async () => { cadenza.bus.emit('goto', 'greenroom'); return 1; })()
+until !!document.querySelector('#view-greenroom .seg-b') ;; 8000
+eval [...document.querySelectorAll('#view-greenroom .seg-b')].find(b => b.textContent.includes('系统')).click()
+until /访问 token/.test(document.querySelector('#view-greenroom')?.textContent || '') ;; 8000
+expect /核心在校验/.test(document.querySelector('#view-greenroom')?.textContent || '')
+expect /已带 token/.test(document.querySelector('#view-greenroom')?.textContent || '')
+# 白名单是模式 `http://*:17994`，页面的 origin 正好在那个端口上 ⇒ 说「吻合」，不该诬告成错配
+expect /吻合/.test(document.querySelector('#view-greenroom')?.textContent || '')
+shot 17-auth-greenroom
+expect /任意主机，端口 17994/.test(document.querySelector('#view-greenroom')?.textContent || '')
+# 清除 ⇒ 重载后回到「要 token」那一格（同一个页面，不靠开发工具手动清 localStorage）
+eval (() => { const b = [...document.querySelectorAll('#view-greenroom button')].find(x => x.textContent.trim() === '清除'); setTimeout(() => b.click(), 50); return !!b; })()
+wait 300
+until !!document.querySelector('#token-gate') ;; 20000
+expect /还没有 token/.test(document.querySelector('#token-gate .gate-bad')?.textContent || '')
+expect !localStorage.getItem('cadenza.token')
+logs

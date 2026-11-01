@@ -10,7 +10,8 @@ Cadenza 是 Lilara 核心（`AgentLilaraCode`）的浏览器前端，照 `../09-
 ## 启动
 
 ```bash
-# 1. 起核心（默认 127.0.0.1:17988，WS 默认只放行 http://127.0.0.1:17990）
+# 1. 起核心（端口 17988；默认监听 0.0.0.0，WS 白名单是**模式** http://*:17990，
+#    并且每次启动都把访问 token 打印在横幅里——见下面「访问 token」）
 #    发布的单文件版（见 AgentLilaraCode/publish）或从源码 dotnet run 都行
 cd E:\Workspace\AgentLilaraCode\src\Lilara.Core && dotnet run -c Debug
 
@@ -39,11 +40,31 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Cadenza\serve.ps1
 → `busybox httpd`（⚠️ 不关缓存）。三个都没有时它会明确说明装哪一个，而不是静默降级。
 
 > ⚠️ 发布的核心单文件**不含前端**：`Cadenza/` 目录要跟着一起分发（它本来就是零构建的静态文件）。
-> 头也可以指到别处的核心（`--core` / 页面 `?core=`），跨机器时注意核心的 WS 白名单只放行
-> `http://127.0.0.1:<头端口>`（`LILARA_ALLOWED_ORIGIN` 可改）。
+> 头也可以指到别处的核心（`--core` / 页面 `?core=`）。跨机器时注意两件事：核心的 WS 白名单默认是
+> **模式** `http://*:<头端口>`（任意主机、端口钉住 ⇒ 别的设备的局域网地址也进得来，`LILARA_ALLOWED_ORIGIN`
+> 可把主机也钉死；设成 `*` 是放行任意 origin，只该调试时用）；以及核心开了鉴权时页面要填 token。
 
-打开 **`http://127.0.0.1:17990`**（不是 `localhost`——那是另一个 origin，核心会静默拒绝握手；
-页面会拉 `/info.allowedOrigin` 比对，并在顶部横幅说清原因）。
+打开 **`http://127.0.0.1:17990`**（`localhost:17990` 也行——白名单按**端口**认，主机名不参与；
+端口对不上时握手会被静默拒绝，页面会拉 `/info.allowedOrigin` 并在顶部横幅写清是哪个端口）。
+万一连不上而横幅说是「被拒握手」，那句话来自同一份判据（见 `js/core.js` 的 `originMatches`）。
+
+### 访问 token
+
+核心（`LILARA_AUTH=1` 时）会校验一个**每次启动重新生成**的 token，并把它打印在自己控制台的启动横幅里
+（`访问 token …` 那一行）。默认**不校验**——那时 token 照样打印，只是没人问。Cadenza 这一侧：
+
+| | 怎么做 |
+|---|---|
+| HTTP | 每条请求都带 `Authorization: Bearer <token>`（`core.js` 的 `_req`，一处出口） |
+| WebSocket | 只能走查询参数 `?token=<token>`——浏览器的 `WebSocket` 构造函数**不能自定义请求头** |
+| 图片 / 库链接 | `<img src>` / `<a href>` 同样只能走查询参数（`blocks.js` 的 `storeUrl`） |
+| 存在哪 | 本机存储 `cadenza.token`（刷新不用重填；清掉就是「没有 token」） |
+| 怎么填 | 页面自己铺一层闸（`.token-gate`）：粘进去 → 保存 → 整页重载。后台「系统」页也有同一格，用于换 / 清 |
+| 401 | 一律先**清掉**存着的那份再弹闸：核心每次启动都换 token，昨天那份今天必然失效 |
+| 没有 `/info` 也一样 | `/info` 是唯一豁免鉴权的端点；未授权时它**照样回 200**，只是少了 `dataRoot` / `workingDirectory` 那几格，并多一个 `authRequired: true` |
+
+⚠️ **代价说清楚**：控制面是明文 HTTP。token 拦得住「随手连上来的人」，挡不住同一网段里的嗅探者；
+它是「谁都能用」与「谁都不能用」之间的一道闸，不是加密。要真的防嗅探，得上 TLS 或隧道。
 
 和 Aquarius 用同一个默认端口，两个头同时开要给其中一个换端口。
 
@@ -108,6 +129,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Cadenza\serve.ps1
     之间唯一不靠翻菜单的路。
   - ⚠️ 停止**不受模型权限轴管**（核心的裁定：撤回类动作放低门槛）：模型把权限拨到 `off` 之后，
     用户仍然停得掉自己机器上的进程。头如实照做，不额外加一道闸。
+- **访问 token 只在核心开了鉴权时才有存在感**：默认（不校验）时页面一条请求都不多带、不弹闸，
+  状态栏也因为 `authRequired:false` 不占那一格。开了之后 HTTP 走 `Authorization: Bearer`、
+  WS 与图片走 `?token=`；401 一律先清掉本机存着的那份再弹闸——核心每次启动都换 token，
+  留着旧的那份只会让人以为「已经填过」。判据是 `/info.authRequired`，**不是**「`/info` 是不是失败」：
+  未授权时它照样回 200，只是不交本机路径那几格。
+- **WS 白名单是模式，不是逐字相等**（核心 `2026-11-05` 起）：默认 `http://*:<头端口>`，主机名通配、
+  端口钉死。于是 `localhost` 与 `127.0.0.1` 都能用，换一台设备用局域网地址打开也能用；
+  而随便一个网页（端口对不上）照样进不来。头这边有一份**最小镜像**（`js/core.js` 的 `originMatches`，
+  与核心 `OriginMatcher` 同一套判据），用途仅限「把话说对」——真正拦人的是核心。
 - **归档会话的拉法是分开的**（核心 `b1d6df9` 起）：`GET /sessions` 只给**未归档**的那些，归档那份走
   `GET /sessions/archived`（行形状逐字相同，`archivedAt` 有值）。所以「一个端点拿全 + 本地过滤」的旧写法
   在新核心上会一条归档都画不出来：节目单默认**一条归档都不拉**，勾上「显示已归档」才多打一次那个端点；
@@ -145,7 +175,14 @@ shell（`11-shell`：后台自检 → `standard` 档被拒且进程没起 → `t
 核心注入的自动回报成对出现 → 模型自己 `jobs` 盘点时列的是同一个 id → `wait(task=…)` 的卡片与配对）、
 归档的拉法（`15-archive`：建一场会话 → 归档 → 新的 `/sessions` 里没有它 → 勾「显示已归档」才从
 `/sessions/archived` 拉回来（带 `archivedAt`）→ 再取消勾选它又不在内存里 → 这时打开它仍然开得起来
-（行由 `/state` 快照补）→ 删掉）。
+（行由 `/state` 快照补）→ 删掉）、
+访问 token（`17-auth`，**要单独跑**：`run.ps1 -Auth` 用 `LILARA_AUTH=1` 起核心、把 token 从启动横幅里抠出来、
+替换步骤脚本里的 `@TOKEN@`，并先用 `/info` 验一遍那把 token——验不出就直接报错，不会伪装成前端坏了。
+脚本本身：没 token → 闸自己出现（不是猜出来的）、错 token → 闸上说「token 不对」且存着的那份被清掉 →
+粘对的走闸的输入框提交 → 连上、`/info` 交出 `dataRoot`、WS 的 URL 带 `?token=`、图片地址带 `?token=` →
+后台系统页说「核心在校验 / 已带 token」、白名单认模式（`任意主机，端口 17994` 判「吻合」）→
+点「清除」回到「要 token」）。
+⚠️ `17-auth` **不在默认脚本列表里**：那个核心会 401 掉别的所有人。
 ⚠️ shell 的中断用例**盘上是物证**：跑完 `e2e\run.ps1` 后，`%TEMP%\cadenza-e2e\proj\shell-started.txt` 应当在、
 而 `shell-finished.txt` **不该**在（命令在 `sleep` 期间被杀掉了）；浏览器看不到文件系统，所以这一步没有自动断言。
 模拟上游带一个 Tavily 形状的 `/search` 端点，联网工具的可配置端点就指过去——**不连真网**。
@@ -165,7 +202,7 @@ Cadenza/
 ├─ js/
 │  ├─ util.js          DOM / 格式化 / toast / 对话框 / JSON 高亮 / 本机存储
 │  ├─ md.js            安全的小 markdown（先转义，只产出自己的标签）
-│  ├─ core.js          HTTP + WS：订阅游标、命令回执、重连、projectKey 计算
+│  ├─ core.js          HTTP + WS：订阅游标、命令回执、重连、projectKey 计算、**访问 token**、origin 模式判据
 │  ├─ model.js         全局状态：会话、项目、待审批、注册表
 │  ├─ blocks.js        块渲染（text / reasoning / toolUse / image / store）
 │  ├─ timeline.js      一个会话的历史 + 实时合流（幂等、配对、分页）
@@ -178,7 +215,7 @@ Cadenza/
 │  ├─ viz.js           顶栏事件谱（canvas）
 │  ├─ palette.js       Ctrl+K
 │  └─ app.js           启动、路由、连接、键盘
-└─ e2e/                cdp.cs · mock.cs · run.ps1 · 1..16 步骤脚本
+└─ e2e/                cdp.cs · mock.cs · run.ps1 · 1..17 步骤脚本（17 要 `-Auth` 单独跑）
 ```
 
 ## 已知边界
@@ -187,7 +224,11 @@ Cadenza/
 - 预设只能覆盖写：核心没有读预设内容的端点。
 - 核心没有改名命令，标题只在建会话时起一次。
 - 「工具结果是不是失败」是按结果文本里的关键字猜的（核心不给结构化状态），只影响颜色。
-- 没有鉴权（核心「本机即可信」的设计）；核心只绑 127.0.0.1，静态宿主也只绑 127.0.0.1。
+- **默认没有鉴权**：核心不设 `LILARA_AUTH=1` 时，任何能连到 17988 的人/程序都能驱动它（模型、工具、本机可读文件）。
+  页面这一侧不再假装安全：核心一开鉴权，401 会立刻弹 token 闸（见上面「访问 token」）。
+- **静态宿主仍只绑 127.0.0.1**（`serve.ps1` 的 `$prefix`、`serve.sh` 选中的服务器同理）：核心已经把白名单放开成
+  按端口认，但头没有 `--bind`，所以今天还是只有本机能打开页面。要在手机/平板上用，得先给头加一个监听地址参数
+  （核心自己的头已经默认 0.0.0.0，这件事在 Cadenza 这边还没做）。
 - **`serve.sh` 只在 Git Bash 上测过**它的分支逻辑（参数、自检、缺服务器提示）；它选中的三个服务器
   里，`serve.py` 与 `serve-router.php` **没有在 macOS / Linux 上真正跑过一次**（本机两者都没装）。
   首次在 Linux 上跑时请先看那两行「服务器：…」的输出对不对。
