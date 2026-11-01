@@ -21,7 +21,7 @@
 #   ./serve.sh --port 17991                    换端口（同时给核心设 LILARA_HEAD_PORT=17991）
 #   ./serve.sh --core http://127.0.0.1:17999   换核心地址
 #   ./serve.sh --root /path/to/Cadenza         换根目录（默认本脚本所在目录）
-#   ./serve.sh --bind 0.0.0.0                  监听地址（默认 127.0.0.1；要对手机/平板开放才改）
+#   ./serve.sh --bind 127.0.0.1                收回仅本机（默认 0.0.0.0，与核心的裁定一致）
 #   ./serve.sh --no-check                      跳过启动自检
 #   ./serve.sh --no-open                       不自动打开浏览器（默认会尝试）
 #   ./serve.sh --open-only                    只打开浏览器（服务器已在别处跑着时）
@@ -39,10 +39,11 @@ CORE="${LILARA_CORE:-http://127.0.0.1:17988}"
 # （头绑到局域网之后，页面里的 127.0.0.1 是打开页面的那台设备自己）。
 CORE_EXPLICIT=0
 [ -n "${LILARA_CORE:-}" ] && CORE_EXPLICIT=1
-# 监听地址。**默认只在本机**：把前端服务给局域网是**一条显式决定**——
-# 核心那边默认已经开了（0.0.0.0），但头只发静态文件，没有理由替用户做这个决定。
-# ⚠️ Windows 上（serve.ps1 走 HttpListener）回环之外还要一条 URL ACL，所以两边默认值一致。
-BIND="${LILARA_HEAD_BIND:-127.0.0.1}"
+# 监听地址。**默认对局域网开放（0.0.0.0）**——与核心 2026-11-05 那个裁定一致：
+# 同一网络里的手机/平板直接打开页面，而不是默认不可用。要收回本机：--bind 127.0.0.1。
+# ⚠️ Windows 上 serve.ps1 走 HttpListener，回环之外还要一条 URL ACL（它会在失败时退回
+#    仅本机并把那条 netsh 命令印出来）；本脚本这三个服务器没有这个概念。
+BIND="${LILARA_HEAD_BIND:-0.0.0.0}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK=1
 OPEN=1
@@ -116,7 +117,7 @@ echo "CADENZA — $URL"
 echo "  页面 origin 必须落在核心的白名单上（默认模式 http://*:$PORT = 任意主机 + 这个端口）"
 echo "  核心 $(if [ "$CORE_EXPLICIT" = "1" ]; then echo "$CORE"; else echo "http://<打开页面的那台机器的地址>:$CORE_PORT（跟着请求的 Host 走；--core 可钉死）"; fi)"
 echo "  根目录 $ROOT"
-echo "  监听 $(if [ "$LOOPBACK" = "1" ]; then echo '127.0.0.1（只在本机；要手机/平板打开用 --bind 0.0.0.0）'; else echo "$BIND（对局域网开放）"; fi)"
+echo "  监听 $(if [ "$LOOPBACK" = "1" ]; then echo '127.0.0.1（只在本机；要对局域网开放用 --bind 0.0.0.0）'; else echo "$BIND（对局域网开放；收回本机：--bind 127.0.0.1）"; fi)"
 lan_block
 echo ""
 

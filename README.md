@@ -28,28 +28,29 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Cadenza\serve.ps1
 |---|---|---|
 | 端口 | `-Port 17991`（或 `LILARA_HEAD_PORT`） | `--port 17991`（或 `LILARA_HEAD_PORT`） |
 | 核心地址 | `-Core http://…`（或 `LILARA_CORE`） | `--core http://…`（或 `LILARA_CORE`） |
-| 监听地址 | `-Bind 0.0.0.0`（或 `LILARA_HEAD_BIND`） | `--bind 0.0.0.0`（或 `LILARA_HEAD_BIND`） |
+| 监听地址 | `-Bind 127.0.0.1`（默认 `0.0.0.0`；或 `LILARA_HEAD_BIND`） | `--bind 127.0.0.1`（默认 `0.0.0.0`；或 `LILARA_HEAD_BIND`） |
 | 根目录 | `-Root …` | `--root …` |
 | 跳过自检 / 不打开浏览器 | `-NoCheck` / `-NoOpen` | `--no-check` / `--no-open` |
 | 只开浏览器 | — | `--open-only` |
 
-**监听地址默认是 `127.0.0.1`（只在本机）。** 要对局域网开放是一条显式决定：
+**监听地址默认是 `0.0.0.0`（对局域网开放）** —— 和核心 2026-11-05 那个裁定一致：同一网络里的
+手机/平板直接打开页面，而不是默认不可用。要收回本机：
 
 ```bash
-# 手机/平板要打开这个页面时才需要（核心的 LILARA_BIND 默认已经是 0.0.0.0）
-./serve.sh --bind 0.0.0.0
-powershell ... -File Cadenza\serve.ps1 -Bind 0.0.0.0
+./serve.sh --bind 127.0.0.1
+powershell ... -File Cadenza\serve.ps1 -Bind 127.0.0.1
 ```
 
-⚠️ **Windows 上多一步**：`serve.ps1` 走 `HttpListener`，绑回环之外的前缀需要一条 URL ACL，
-没有它 `Start()` 直接报「拒绝访问」（这台机器上实测如此）。先跑一次（管理员）：
+⚠️ **Windows 上多一步（只有 `serve.ps1` 有这道坎）**：它走 `HttpListener`，绑回环之外的前缀需要一条
+URL ACL，没有它 `Start()` 报「拒绝访问」（这台机器上实测如此）。先跑一次（管理员）：
 
 ```
 netsh http add urlacl url=http://+:17990/ user=<你的用户名>
 ```
 
-`serve.ps1` 在失败时会把这条命令原样打出来（带你的用户名），不会把它说成「端口被占」。
-macOS / Linux 上的 `php -S` / `python3` 没有这个概念，`--bind 0.0.0.0` 直接生效。
+`serve.ps1` **不会因此起不来**：它会印出上面那条命令（带你的用户名）然后**退回仅本机**继续服务，
+横幅里明说「退回：0.0.0.0 被 Windows 拒绝」——在那之前页面在本机能用、手机连不上。
+macOS / Linux 上的 `php -S` / `python3` 没有这个概念，默认就直接对局域网开放。
 
 `/config.json`（页面启动时读它拿核心地址）**跟着请求的 Host 走**：没显式给 `-Core` / `--core` 时，
 它交回「打开页面的那个地址 + 核心端口」。写死 `127.0.0.1` 的话，手机打开页面会去连**手机自己**——
@@ -251,10 +252,10 @@ Cadenza/
 - 「工具结果是不是失败」是按结果文本里的关键字猜的（核心不给结构化状态），只影响颜色。
 - **默认没有鉴权**：核心不设 `LILARA_AUTH=1` 时，任何能连到 17988 的人/程序都能驱动它（模型、工具、本机可读文件）。
   页面这一侧不再假装安全：核心一开鉴权，401 会立刻弹 token 闸（见上面「访问 token」）。
-- **静态宿主默认只绑 `127.0.0.1`**，要对局域网开放得显式 `--bind 0.0.0.0` / `-Bind 0.0.0.0`
-  （Windows 上还要一条 URL ACL，见上面「监听地址」）。核心那边默认已经放开到 0.0.0.0 + 白名单按端口认，
-  但头只发静态文件，这个决定留给用户；一旦开了，`/config.json` 会跟着请求的 Host 走，
-  否则手机打开页面会去连自己。
+- **静态宿主默认对局域网开放（`0.0.0.0`）**，`--bind 127.0.0.1` / `-Bind 127.0.0.1` 收回本机。
+  它只发静态文件，**真正能被驱动的是核心**——要不要拦人看核心的 `LILARA_AUTH`。
+  ⚠️ 只有 `serve.ps1`（`HttpListener` + http.sys）在 Windows 上需要一条 URL ACL；没有时它会退回仅本机
+  并把命令印出来（见上面「监听地址」），不会静默假装开好了。
 - **`serve.sh` 只在 Git Bash 上测过**它的分支逻辑（参数、自检、缺服务器提示）；它选中的三个服务器
   里，`serve.py` 与 `serve-router.php` **没有在 macOS / Linux 上真正跑过一次**（本机两者都没装）。
   首次在 Linux 上跑时请先看那两行「服务器：…」的输出对不对。

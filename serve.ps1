@@ -9,7 +9,7 @@
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File Cadenza\serve.ps1
 #   powershell ... -Port 17990 -Core http://127.0.0.1:17988
-#   powershell ... -Bind 0.0.0.0        (对局域网开放；Windows 先加一条 URL ACL，见下)
+#   powershell ... -Bind 127.0.0.1      (收回仅本机；默认 0.0.0.0，Windows 需要 URL ACL，见下)
 #
 # ⚠️ **与 serve.sh 是同一份契约的两个实现**（用户裁定 2026-10-23：只做跨平台脚本，
 #    不另起一个 exe 宿主）。参数名、默认值、启动自检、报错措辞要对齐——这一对**曾经漂过**：
@@ -21,12 +21,13 @@ param(
     [int]$Port = 17990,
     [string]$Core = "http://127.0.0.1:17988",
     [string]$Root = $PSScriptRoot,
-    # 监听地址。**默认只在本机**——不是审美选择，是 `HttpListener` 的硬约束：
-    # 回环之外的前缀（`http://+:17990/`）需要一条 URL ACL，没有它 Start() 直接「拒绝访问」，
-    # 而这台机器上实测就是没加（非管理员）。所以要对局域网开放是**一条显式决定**：
-    #   -Bind 0.0.0.0        （先按下面那句 netsh 加一次 ACL，或者用管理员身份跑）
-    # 要从手机/平板打开页面时才需要它；只在本机看时，默认值就是对的。
-    [string]$Bind = "127.0.0.1",
+    # 监听地址。**默认对局域网开放（0.0.0.0）**——与核心 2026-11-05 那个裁定一致：
+    # 同一网络里的手机/平板直接打开页面，而不是默认不可用。真要收回本机：-Bind 127.0.0.1。
+    # ⚠️ Windows 上有一道额外的坎：`HttpListener` 绑回环之外的前缀需要一条 URL ACL，
+    # 没有它 Start() 报「拒绝访问」。那种情况下本脚本**不会就地死掉**——它会印出那条
+    # netsh 命令，然后**退回仅本机**接着服务（页面在本机能用，手机连不上，横幅里说清楚）。
+    # 核心自己的头不需要这一步：Kestrel 不经过 http.sys。
+    [string]$Bind = "0.0.0.0",
     # 2026-10-23：与 serve.sh 的 --no-check / --no-open 对齐。默认会自检并打开浏览器；
     # 自动化（e2e、脚本拉起）用这两个开关关掉。
     [switch]$NoCheck,
@@ -74,20 +75,49 @@ function Get-CoreForRequest($req) {
     return "http://${hostPart}:$corePort"
 }
 
+# 绑不上时的那句话——回环与非回环的失败**长得一样，处理方式完全不同**，
+# 所以这句措辞要跟着「想要的那个地址」走，不能一律说成「端口被占」。
+# ⚠️ 异常文本要**传进来**：函数里的 `$_` 不是 catch 的那个 `$_`。
+function Write-BindFailure($why, $message) {
+    Write-Host "✗ Cadenza 起不来（$prefix）：$message" -ForegroundColor Red
+    if ($why -eq "loopback") {
+        Write-Host "  端口被占或落在 Windows 保留段。换个端口：-Port 17991，并设 LILARA_HEAD_PORT=17991 后重启核心。"
+    } else {
+        Write-Host "  绑回环之外的地址需要一个管理员身份或一条 URL ACL。要真的对局域网开放，先跑一次（管理员）："
+        Write-Host "      netsh http add urlacl url=http://+:$Port/ user=$env:USERNAME" -ForegroundColor Cyan
+    }
+}
+
+$listeningOn = $Bind
+$aclBlocked = $false
+$bindError = $null
 try {
     $listener.Start()
 } catch {
-    Write-Host "✗ Cadenza 起不来（$prefix）：$($_.Exception.Message)" -ForegroundColor Red
+    # ⚠️ 取 InnerException：外层那句「使用“0”个参数调用“Start”时发生异常」只是壳，
+    # 真正要印给用户看的是里面那句「拒绝访问。」/「端口已被占用」。
+    $bindError = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
     if (-not $isLoopback) {
-        # ⚠️ 这一格几乎总是「URL ACL 没加」：HttpListener 绑回环之外的前缀需要一条保留，
-        # 而它不是端口占用。把命令原样印出来——不然这句话看起来像「端口被占」。
-        Write-Host "  绑回环之外的地址需要一条 URL ACL（Windows 的规矩，不是端口被占）。先跑一次（管理员）："
-        Write-Host "      netsh http add urlacl url=http://+:$Port/ user=$env:USERNAME" -ForegroundColor Cyan
-        Write-Host "  或者用管理员身份重跑本脚本。不想动 ACL 就用默认的 -Bind 127.0.0.1（只在本机用）。"
+        # ⚠️ 不动 ACL 的机器上（实测就是这台）默认值会撞上这条：**退回仅本机**而不是退出。
+        # 默认值不该把「能用」变成「起不来」；手机连不上这件事由横幅说清楚，别让人对着
+        # 一行「拒绝访问」自己猜是端口还是权限。
+        $aclBlocked = $true
+        $listener = [System.Net.HttpListener]::new()
+        $listener.Prefixes.Add("http://127.0.0.1:$Port/")
+        $prefix = "http://127.0.0.1:$Port/"
+        $isLoopback = $true
+        $listeningOn = "127.0.0.1"
+        try {
+            $listener.Start()
+        } catch {
+            $inner = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
+            Write-BindFailure "loopback" $inner
+            exit 1
+        }
     } else {
-        Write-Host "  端口被占或落在 Windows 保留段。换个端口：-Port 17991，并设 LILARA_HEAD_PORT=17991 后重启核心。"
+        Write-BindFailure "loopback" $bindError
+        exit 1
     }
-    exit 1
 }
 
 $types = @{
@@ -105,10 +135,19 @@ Write-Host "CADENZA — http://127.0.0.1:$Port"
 Write-Host "  页面 origin 必须落在核心的白名单上（默认模式 http://*:$Port = 任意主机 + 这个端口）"
 Write-Host "  核心 $(if ($coreExplicit) { $Core } else { "http://<打开页面的那台机器的地址>:$corePort（跟着请求的 Host 走；-Core 可钉死）" })"
 Write-Host "  根目录 $Root"
-Write-Host "  监听 $(if ($isLoopback) { "127.0.0.1（只在本机；要手机/平板打开用 -Bind 0.0.0.0）" } else { "$Bind（对局域网开放）" })"
+Write-Host "  监听 $listeningOn$(if ($aclBlocked) { "（退回：$Bind 被 Windows 拒绝）" } elseif ($isLoopback) { "（只在本机；要对局域网开放：-Bind 0.0.0.0）" } else { "（对局域网开放）" })"
 Write-Host ""
 
-# 对局域网开放时把代价说出来，并把可达地址列出来（别的设备照着输）。
+# ACL 没加时的退回：一定要说出来，否则「手机打不开」会被当成前端或核心的毛病。
+if ($aclBlocked) {
+    Write-Host "  ⚠️ 想绑 $Bind 但 Windows 拒了（URL ACL）——已退回仅本机（$bindError）。" -ForegroundColor Yellow
+    Write-Host "     要对局域网开放，先跑一次（管理员），再重启本脚本："
+    Write-Host "       netsh http add urlacl url=http://+:$Port/ user=$env:USERNAME" -ForegroundColor Cyan
+    Write-Host "     在那之前，手机/平板打不开这个页面（核心那边没问题）。"
+    Write-Host ""
+}
+
+# 对局域网开放时把可达地址列出来（别的设备照着输）。
 # ⚠️ 头只发静态文件，**真正能被驱动的是核心**：所以「要不要拦人」那道闸在核心那边（LILARA_AUTH）。
 if (-not $isLoopback) {
     Write-Host "  ⚠️ 头对局域网开放：同一网络里的设备都能打开这个页面。" -ForegroundColor Yellow

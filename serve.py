@@ -111,8 +111,8 @@ def make_handler(root: str, core, core_port: int):
 def main():
     ap = argparse.ArgumentParser(description="Cadenza static host")
     ap.add_argument("--port", type=int, default=int(os.environ.get("LILARA_HEAD_PORT", "17990")))
-    # ⚠️ 默认只在本机（与 serve.ps1 / serve.sh 同一个默认值）。要对手机/平板开放才 --bind 0.0.0.0。
-    ap.add_argument("--bind", default=os.environ.get("LILARA_HEAD_BIND", "127.0.0.1"))
+    # ⚠️ 默认对局域网开放（0.0.0.0），与核心 2026-11-05 那个裁定一致；收回本机才 --bind 127.0.0.1。
+    ap.add_argument("--bind", default=os.environ.get("LILARA_HEAD_BIND", "0.0.0.0"))
     ap.add_argument("--root", default=os.path.dirname(os.path.abspath(__file__)))
     # None = 没显式给 ⇒ 跟着请求的 Host 走（见 core_for_host）。
     ap.add_argument("--core", default=os.environ.get("LILARA_CORE") or None)
@@ -131,7 +131,7 @@ def main():
     print(f"CADENZA — http://127.0.0.1:{a.port}", flush=True)
     print(f"  核心 {core or f'http://<打开页面的那台机器的地址>:{core_port}（跟着请求的 Host 走；--core 可钉死）'}", flush=True)
     print(f"  根目录 {os.path.realpath(a.root)}", flush=True)
-    print(f"  监听 {a.bind}{'（只在本机；要手机/平板打开用 --bind 0.0.0.0）' if loopback else '（对局域网开放）'}", flush=True)
+    print(f"  监听 {a.bind}{'（对局域网开放；收回本机：--bind 127.0.0.1）' if not loopback else '（只在本机）'}", flush=True)
     if not loopback:
         print("  ⚠️ 头对局域网开放：同一网络里的设备都能打开这个页面。", flush=True)
         print("     要收回本机：--bind 127.0.0.1；要拦人：核心设 LILARA_AUTH=1。", flush=True)
