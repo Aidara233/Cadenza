@@ -21,12 +21,13 @@
 #   ./serve.sh --port 17991                    换端口（同时给核心设 LILARA_HEAD_PORT=17991）
 #   ./serve.sh --core http://127.0.0.1:17999   换核心地址
 #   ./serve.sh --root /path/to/Cadenza         换根目录（默认本脚本所在目录）
+#   ./serve.sh --bind 0.0.0.0                  监听地址（默认 127.0.0.1；要对手机/平板开放才改）
 #   ./serve.sh --no-check                      跳过启动自检
 #   ./serve.sh --no-open                       不自动打开浏览器（默认会尝试）
 #   ./serve.sh --open-only                    只打开浏览器（服务器已在别处跑着时）
 #
-# 环境变量：LILARA_HEAD_PORT / LILARA_CORE 是**默认值的来源**（与 serve.ps1 同名），
-# 命令行参数优先。
+# 环境变量：LILARA_HEAD_PORT / LILARA_CORE / LILARA_HEAD_BIND 是**默认值的来源**
+# （与核心自己的头同名），命令行参数优先。
 #
 # 停止：Ctrl+C。
 
@@ -34,19 +35,30 @@ set -u
 
 PORT="${LILARA_HEAD_PORT:-17990}"
 CORE="${LILARA_CORE:-http://127.0.0.1:17988}"
+# 「核心地址是不是用户钉的」：钉了就照抄，没钉就让实现跟着**请求的 Host** 走
+# （头绑到局域网之后，页面里的 127.0.0.1 是打开页面的那台设备自己）。
+CORE_EXPLICIT=0
+[ -n "${LILARA_CORE:-}" ] && CORE_EXPLICIT=1
+# 监听地址。**默认只在本机**：把前端服务给局域网是**一条显式决定**——
+# 核心那边默认已经开了（0.0.0.0），但头只发静态文件，没有理由替用户做这个决定。
+# ⚠️ Windows 上（serve.ps1 走 HttpListener）回环之外还要一条 URL ACL，所以两边默认值一致。
+BIND="${LILARA_HEAD_BIND:-127.0.0.1}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK=1
 OPEN=1
 OPEN_ONLY=0
 
-usage() { sed -n '20,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# ⚠️ 用「从哪一行到哪一行」的锚文本，不用行号：加一行用法就会把 `sed -n '20,30p'` 打偏。
+usage() { sed -n '/^# 用法：/,/^# 停止/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --port)      [ $# -ge 2 ] || { echo "✗ --port 缺值" >&2; exit 2; }; PORT="$2"; shift 2 ;;
         --port=*)    PORT="${1#*=}"; shift ;;
-        --core)      [ $# -ge 2 ] || { echo "✗ --core 缺值" >&2; exit 2; }; CORE="$2"; shift 2 ;;
-        --core=*)    CORE="${1#*=}"; shift ;;
+        --core)      [ $# -ge 2 ] || { echo "✗ --core 缺值" >&2; exit 2; }; CORE="$2"; CORE_EXPLICIT=1; shift 2 ;;
+        --core=*)    CORE="${1#*=}"; CORE_EXPLICIT=1; shift ;;
+        --bind)      [ $# -ge 2 ] || { echo "✗ --bind 缺值" >&2; exit 2; }; BIND="$2"; shift 2 ;;
+        --bind=*)    BIND="${1#*=}"; shift ;;
         --root)      [ $# -ge 2 ] || { echo "✗ --root 缺值" >&2; exit 2; }; ROOT="$2"; shift 2 ;;
         --root=*)    ROOT="${1#*=}"; shift ;;
         --no-check)  CHECK=0; shift ;;
@@ -60,10 +72,34 @@ done
 
 case "$PORT" in ''|*[!0-9]*) echo "✗ --port 必须是数字：'$PORT'" >&2; exit 2 ;; esac
 CORE="${CORE%/}"
+# 核心端口：没显式给地址时，实现要用它拼「同一个地址 + 核心端口」。
+CORE_PORT="${CORE##*:}"
+case "$CORE_PORT" in ''|*[!0-9]*) CORE_PORT=17988 ;; esac
 ROOT="$(cd "$ROOT" 2>/dev/null && pwd)" || { echo "✗ --root 不存在：'$ROOT'" >&2; exit 2; }
 [ -f "$ROOT/index.html" ] || { echo "✗ $ROOT 里没有 index.html——这不是 Cadenza 目录" >&2; exit 2; }
 
 URL="http://127.0.0.1:$PORT"
+
+case "$BIND" in
+    127.0.0.1|localhost|::1|"[::1]") LOOPBACK=1 ;;
+    *) LOOPBACK=0 ;;
+esac
+
+# 对局域网开放时把代价与可达地址说出来（与 serve.ps1 逐句对齐）。
+# ⚠️ 头只发静态文件，**真正能被驱动的是核心**：「要不要拦人」那道闸在核心那边（LILARA_AUTH）。
+lan_block() {
+    [ "$LOOPBACK" = "0" ] || return 0
+    echo "  ⚠️ 头对局域网开放（$BIND）：同一网络里的设备都能打开这个页面。"
+    echo "     核心那边也得能被这个地址连上（LILARA_BIND 默认已是 0.0.0.0）。"
+    echo "     要收回本机：--bind 127.0.0.1；要拦人：核心设 LILARA_AUTH=1。"
+    # 可达地址：换一台设备时照着输。拿不到就跳过（列不出来不该影响启动）。
+    if command -v hostname >/dev/null 2>&1; then
+        for addr in $(hostname -I 2>/dev/null || true); do
+            case "$addr" in *:*) continue ;; esac      # IPv6 先不列（方括号写法容易出错）
+            echo "     可达地址 http://$addr:$PORT"
+        done
+    fi
+}
 
 # ⚠️ 判据是**模式**：核心 2026-11-05 起默认放行 `http://*:<头端口>`（任意主机，端口钉住），
 # 所以 localhost / 127.0.0.1 / 局域网 IP 打开都行——逐字相等会把这些全部误报成「不吻合」。
@@ -78,9 +114,10 @@ open_browser() {
 
 echo "CADENZA — $URL"
 echo "  页面 origin 必须落在核心的白名单上（默认模式 http://*:$PORT = 任意主机 + 这个端口）"
-echo "  核心 $CORE（页面直连；可用 ?core= 或「后台 · 系统」覆盖）"
+echo "  核心 $(if [ "$CORE_EXPLICIT" = "1" ]; then echo "$CORE"; else echo "http://<打开页面的那台机器的地址>:$CORE_PORT（跟着请求的 Host 走；--core 可钉死）"; fi)"
 echo "  根目录 $ROOT"
-echo "  端口必须是 $PORT；主机名/地址随意（127.0.0.1、localhost 都行——核心按端口放行）"
+echo "  监听 $(if [ "$LOOPBACK" = "1" ]; then echo '127.0.0.1（只在本机；要手机/平板打开用 --bind 0.0.0.0）'; else echo "$BIND（对局域网开放）"; fi)"
+lan_block
 echo ""
 
 if [ "$OPEN_ONLY" = "1" ]; then OPEN=1; open_browser; echo "  已在浏览器打开 $URL/"; exit 0; fi
@@ -123,20 +160,33 @@ echo ""
 
 if command -v php >/dev/null 2>&1; then
     open_browser
-    echo "  服务器：php -S（-t 根目录，路由交给 router.php 处理 no-store）"
-    exec php -S "127.0.0.1:$PORT" -t "$ROOT" "$ROOT/serve-router.php"
+    echo "  服务器：php -S $BIND:$PORT（-t 根目录，路由交给 serve-router.php 处理 no-store）"
+    # ⚠️ 只有**显式**给了核心地址才传 `LILARA_CORE`：serve-router.php 拿它当「别改写我」的信号，
+    #    没给时它自己跟着请求的 Host 走。早先这里连 `--core` 都没传过去，php 那条路把它丢了。
+    if [ "$CORE_EXPLICIT" = "1" ]; then export LILARA_CORE="$CORE"; fi
+    export LILARA_CORE_PORT="$CORE_PORT"
+    exec php -S "$BIND:$PORT" -t "$ROOT" "$ROOT/serve-router.php"
 fi
 
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; assert sys.version_info[0] == 3' >/dev/null 2>&1; then
     open_browser
     echo "  服务器：python3（serve.py；no-store 与 /config.json 由它给）"
-    exec python3 "$ROOT/serve.py" --port "$PORT" --root "$ROOT" --core "$CORE"
+    set -- --bind "$BIND" --port "$PORT" --root "$ROOT" --core-port "$CORE_PORT"
+    if [ "$CORE_EXPLICIT" = "1" ]; then set -- "$@" --core "$CORE"; fi
+    exec python3 "$ROOT/serve.py" "$@"
 fi
 
 if command -v busybox >/dev/null 2>&1 && busybox --list 2>/dev/null | grep -qx httpd; then
     open_browser
     echo "  服务器：busybox httpd（⚠️ 不支持 no-store；改了 js/css 记得硬刷新）"
-    exec busybox httpd -f -p "127.0.0.1:$PORT" -h "$ROOT"
+    if [ "$LOOPBACK" = "0" ]; then
+        # ⚠️ 这一条是「能用」与「看起来能用」的分界：busybox httpd 没有路由，
+        # 也就没有 /config.json ⇒ 页面会退回默认核心地址 127.0.0.1:17988，
+        # 而那在别的设备上指的是**设备自己**。
+        echo "  ⚠️ busybox 不给 /config.json：页面会退回 127.0.0.1:17988，局域网里的别的设备连不上核心。"
+        echo "     要对局域网开放，换 php 或 python3（serve.py 会按请求的 Host 拼核心地址）。"
+    fi
+    exec busybox httpd -f -p "$BIND:$PORT" -h "$ROOT"
 fi
 
 cat >&2 <<'EOF'

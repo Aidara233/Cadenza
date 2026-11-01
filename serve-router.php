@@ -7,15 +7,34 @@
 //    这里只处理上面两条。别把它扩成一个「顺便做点什么」的框架。
 $root = __DIR__;
 $port = $_SERVER['SERVER_PORT'] ?? '17990';
-$core = getenv('LILARA_CORE') ?: 'http://127.0.0.1:17988';
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 
 header('Cache-Control: no-store');
 header('X-Content-Type-Options: nosniff');
 
 if ($path === '/config.json') {
+    // ⚠️ 核心地址：显式给了 `LILARA_CORE` 就照抄（核心在别的机器上 / 走了隧道，头不许改写）；
+    //    没给时用**这次请求的 Host** 拼同一个地址 + 核心端口——头绑到局域网之后，页面里的
+    //    `127.0.0.1` 指的是**打开页面的那台设备自己**，写死它等于「手机永远连不上」，
+    //    而那个症状与「核心没起来」一模一样。
+    $coreEnv = getenv('LILARA_CORE');
+    $corePort = getenv('LILARA_CORE_PORT') ?: '17988';
+    if ($coreEnv) {
+        $core = rtrim($coreEnv, '/');
+    } else {
+        $host = $_SERVER['HTTP_HOST'] ?? '';
+        // ⚠️ 不用 `str_starts_with`（PHP 8.0+）：serve.sh 挑的是「现成的 php」，
+        // 发行版里 7.4 还很常见。
+        if ($host !== '' && $host[0] === '[') {              // IPv6 字面量：[::1]:17990
+            $end = strpos($host, ']');
+            $hostOnly = $end === false ? '' : substr($host, 0, $end + 1);
+        } else {
+            $hostOnly = explode(':', $host, 2)[0];          // 192.168.1.5:17990 → 192.168.1.5
+        }
+        $core = 'http://' . ($hostOnly !== '' ? $hostOnly : '127.0.0.1') . ':' . $corePort;
+    }
     header('Content-Type: application/json; charset=utf-8');
-    echo json_encode(['core' => rtrim($core, '/')], JSON_UNESCAPED_SLASHES);
+    echo json_encode(['core' => $core], JSON_UNESCAPED_SLASHES);
     return true;
 }
 

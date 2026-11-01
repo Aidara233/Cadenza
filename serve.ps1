@@ -9,6 +9,7 @@
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File Cadenza\serve.ps1
 #   powershell ... -Port 17990 -Core http://127.0.0.1:17988
+#   powershell ... -Bind 0.0.0.0        (对局域网开放；Windows 先加一条 URL ACL，见下)
 #
 # ⚠️ **与 serve.sh 是同一份契约的两个实现**（用户裁定 2026-10-23：只做跨平台脚本，
 #    不另起一个 exe 宿主）。参数名、默认值、启动自检、报错措辞要对齐——这一对**曾经漂过**：
@@ -20,6 +21,12 @@ param(
     [int]$Port = 17990,
     [string]$Core = "http://127.0.0.1:17988",
     [string]$Root = $PSScriptRoot,
+    # 监听地址。**默认只在本机**——不是审美选择，是 `HttpListener` 的硬约束：
+    # 回环之外的前缀（`http://+:17990/`）需要一条 URL ACL，没有它 Start() 直接「拒绝访问」，
+    # 而这台机器上实测就是没加（非管理员）。所以要对局域网开放是**一条显式决定**：
+    #   -Bind 0.0.0.0        （先按下面那句 netsh 加一次 ACL，或者用管理员身份跑）
+    # 要从手机/平板打开页面时才需要它；只在本机看时，默认值就是对的。
+    [string]$Bind = "127.0.0.1",
     # 2026-10-23：与 serve.sh 的 --no-check / --no-open 对齐。默认会自检并打开浏览器；
     # 自动化（e2e、脚本拉起）用这两个开关关掉。
     [switch]$NoCheck,
@@ -28,15 +35,58 @@ param(
 
 $ErrorActionPreference = "Stop"
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
-$prefix = "http://127.0.0.1:$Port/"
+
+# 环境变量是默认值的来源（与 serve.sh / 核心自己的头同名），命令行参数优先。
+if (-not $PSBoundParameters.ContainsKey("Bind") -and $env:LILARA_HEAD_BIND) { $Bind = $env:LILARA_HEAD_BIND }
+if (-not $PSBoundParameters.ContainsKey("Port") -and $env:LILARA_HEAD_PORT) {
+    $p = 0; if ([int]::TryParse($env:LILARA_HEAD_PORT, [ref]$p) -and $p -gt 0) { $Port = $p }
+}
+
+# 回环之外的任何写法都落到 `+`（HttpListener 只认通配或具体字面量，两者都要 ACL；
+# `+` 与 `*` 在这里是同一个意思）。
+$isLoopback = $Bind -in @("127.0.0.1", "localhost", "::1", "[::1]")
+$bindHost = if ($isLoopback) { "127.0.0.1" } else { "+" }
+$prefix = "http://${bindHost}:$Port/"
 $listener = [System.Net.HttpListener]::new()
 $listener.Prefixes.Add($prefix)
+
+# ⚠️ 核心地址**要不要跟着请求走**：显式给了 -Core 就照抄（核心在别的机器上 / 走了隧道，
+#    头不许改写它）；没给时用**这次请求的 Host** 拼（同一个地址 + 核心端口）——绑到局域网之后，
+#    页面里的 `127.0.0.1` 指的是**手机自己**，写死它等于永远连不上，而症状与「核心没起来」一模一样。
+$coreExplicit = $PSBoundParameters.ContainsKey("Core")
+$corePort = 17988
+try { $p = ([System.Uri]$Core).Port; if ($p -gt 0) { $corePort = $p } } catch { }
+
+function Get-CoreForRequest($req) {
+    if ($coreExplicit) { return $Core }
+    $h = $req.Headers["Host"]
+    if ([string]::IsNullOrWhiteSpace($h)) { return $Core }
+    $h = $h.Trim()
+    # Host 头可能是 `192.168.1.5:17990` 或 `[::1]:17990`：只取地址那一段。
+    $hostPart = if ($h.StartsWith("[")) {
+        $close = $h.IndexOf("]")
+        if ($close -lt 0) { return $Core }
+        $h.Substring(0, $close + 1)
+    } else {
+        ($h -split ":")[0]
+    }
+    if ([string]::IsNullOrWhiteSpace($hostPart)) { return $Core }
+    return "http://${hostPart}:$corePort"
+}
 
 try {
     $listener.Start()
 } catch {
     Write-Host "✗ Cadenza 起不来（$prefix）：$($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "  端口被占或落在 Windows 保留段。换个端口：-Port 17991，并设 LILARA_HEAD_PORT=17991 后重启核心。"
+    if (-not $isLoopback) {
+        # ⚠️ 这一格几乎总是「URL ACL 没加」：HttpListener 绑回环之外的前缀需要一条保留，
+        # 而它不是端口占用。把命令原样印出来——不然这句话看起来像「端口被占」。
+        Write-Host "  绑回环之外的地址需要一条 URL ACL（Windows 的规矩，不是端口被占）。先跑一次（管理员）："
+        Write-Host "      netsh http add urlacl url=http://+:$Port/ user=$env:USERNAME" -ForegroundColor Cyan
+        Write-Host "  或者用管理员身份重跑本脚本。不想动 ACL 就用默认的 -Bind 127.0.0.1（只在本机用）。"
+    } else {
+        Write-Host "  端口被占或落在 Windows 保留段。换个端口：-Port 17991，并设 LILARA_HEAD_PORT=17991 后重启核心。"
+    }
     exit 1
 }
 
@@ -53,10 +103,25 @@ $types = @{
 
 Write-Host "CADENZA — http://127.0.0.1:$Port"
 Write-Host "  页面 origin 必须落在核心的白名单上（默认模式 http://*:$Port = 任意主机 + 这个端口）"
-Write-Host "  核心 $Core（页面直连；可用 ?core= 或「后台 · 系统」覆盖）"
+Write-Host "  核心 $(if ($coreExplicit) { $Core } else { "http://<打开页面的那台机器的地址>:$corePort（跟着请求的 Host 走；-Core 可钉死）" })"
 Write-Host "  根目录 $Root"
-Write-Host "  端口必须是 $Port；主机名/地址随意（127.0.0.1、localhost 都行——核心按端口放行）"
+Write-Host "  监听 $(if ($isLoopback) { "127.0.0.1（只在本机；要手机/平板打开用 -Bind 0.0.0.0）" } else { "$Bind（对局域网开放）" })"
 Write-Host ""
+
+# 对局域网开放时把代价说出来，并把可达地址列出来（别的设备照着输）。
+# ⚠️ 头只发静态文件，**真正能被驱动的是核心**：所以「要不要拦人」那道闸在核心那边（LILARA_AUTH）。
+if (-not $isLoopback) {
+    Write-Host "  ⚠️ 头对局域网开放：同一网络里的设备都能打开这个页面。" -ForegroundColor Yellow
+    Write-Host "     核心那边也得能被这个地址连上（LILARA_BIND 默认已是 0.0.0.0）。"
+    Write-Host "     要收回本机：-Bind 127.0.0.1；要拦人：核心设 LILARA_AUTH=1。"
+    try {
+        [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
+            Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and
+                           -not [System.Net.IPAddress]::IsLoopback($_) } |
+            ForEach-Object { Write-Host "     可达地址 http://$($_):$Port" }
+    } catch { }
+    Write-Host ""
+}
 
 # Startup check: say out loud what the fatal-but-silent failure is.
 if (-not $NoCheck) {
@@ -104,7 +169,9 @@ try {
             $res.Headers["Cache-Control"] = "no-store"
 
             if ($path -eq "/config.json") {
-                $body = [System.Text.Encoding]::UTF8.GetBytes("{`"core`":`"$Core`"}")
+                # ⚠️ 跟着**请求的 Host** 走，不是写死 —— 见上面 `Get-CoreForRequest` 的注释。
+                $coreUrl = Get-CoreForRequest $req
+                $body = [System.Text.Encoding]::UTF8.GetBytes("{`"core`":`"$coreUrl`"}")
                 $res.ContentType = "application/json; charset=utf-8"
             } else {
                 $rel = $path.TrimStart("/").Replace("/", [System.IO.Path]::DirectorySeparatorChar)

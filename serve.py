@@ -9,12 +9,14 @@
 
 用法（serve.sh 会拉起它，也可以直接跑）：
     python3 serve.py --port 17990 --root . --core http://127.0.0.1:17988
+    python3 serve.py --port 17990 --root .                  # 核心地址跟着请求的 Host 走
 """
 
 import argparse
 import json
 import os
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -28,7 +30,29 @@ TYPES = {
 }
 
 
-def make_handler(root: str, core: str):
+def core_for_host(host_header, core_port, fallback):
+    """这次请求该拿哪个核心地址。
+
+    ⚠️ 头绑到局域网之后，页面里的 `127.0.0.1` 指的是**打开页面的那台设备自己** ⇒ 写死它
+    等于「手机永远连不上，而症状与核心没起来一模一样」。所以没显式给核心地址时，用**请求的
+    Host**（同一个地址）+ 核心端口。显式给了就照抄：那是「核心在别的机器上 / 走了隧道」那条路。
+    """
+    host = (host_header or "").strip()
+    if not host:
+        return fallback
+    if host.startswith("["):                      # IPv6 字面量：[::1]:17990
+        end = host.find("]")
+        if end < 0:
+            return fallback
+        host = host[: end + 1]
+    else:
+        host = host.split(":", 1)[0]              # 192.168.1.5:17990 → 192.168.1.5
+    if not host:
+        return fallback
+    return f"http://{host}:{core_port}"
+
+
+def make_handler(root: str, core, core_port: int):
     root = os.path.realpath(root)
 
     class Handler(SimpleHTTPRequestHandler):
@@ -54,7 +78,10 @@ def make_handler(root: str, core: str):
         def do_GET(self):
             path = self.path.split("?", 1)[0]
             if path == "/config.json":
-                body = json.dumps({"core": core}, separators=(",", ":")).encode()
+                url = core if core else core_for_host(self.headers.get("Host"), core_port, "")
+                if not url:
+                    url = f"http://127.0.0.1:{core_port}"
+                body = json.dumps({"core": url}, separators=(",", ":")).encode()
                 self._send(200, "application/json; charset=utf-8", body)
                 return
 
@@ -84,14 +111,34 @@ def make_handler(root: str, core: str):
 def main():
     ap = argparse.ArgumentParser(description="Cadenza static host")
     ap.add_argument("--port", type=int, default=int(os.environ.get("LILARA_HEAD_PORT", "17990")))
+    # ⚠️ 默认只在本机（与 serve.ps1 / serve.sh 同一个默认值）。要对手机/平板开放才 --bind 0.0.0.0。
+    ap.add_argument("--bind", default=os.environ.get("LILARA_HEAD_BIND", "127.0.0.1"))
     ap.add_argument("--root", default=os.path.dirname(os.path.abspath(__file__)))
-    ap.add_argument("--core", default=os.environ.get("LILARA_CORE", "http://127.0.0.1:17988"))
+    # None = 没显式给 ⇒ 跟着请求的 Host 走（见 core_for_host）。
+    ap.add_argument("--core", default=os.environ.get("LILARA_CORE") or None)
+    ap.add_argument("--core-port", type=int, default=int(os.environ.get("LILARA_CORE_PORT", "17988")))
     a = ap.parse_args()
 
-    handler = make_handler(a.root, a.core.rstrip("/"))
-    # 只监听回环：与核心同一条边界（本机单用户）。
-    httpd = ThreadingHTTPServer(("127.0.0.1", a.port), handler)
-    print(f"  服务器：python3 http.server on 127.0.0.1:{a.port}", flush=True)
+    core = a.core.rstrip("/") if a.core else None
+    core_port = a.core_port
+    if core:
+        # 核心地址也可能自己带端口（--core http://192.168.1.5:18000）。
+        parts = urlsplit(core)
+        if parts.port:
+            core_port = parts.port
+
+    loopback = a.bind in ("127.0.0.1", "localhost", "::1")
+    print(f"CADENZA — http://127.0.0.1:{a.port}", flush=True)
+    print(f"  核心 {core or f'http://<打开页面的那台机器的地址>:{core_port}（跟着请求的 Host 走；--core 可钉死）'}", flush=True)
+    print(f"  根目录 {os.path.realpath(a.root)}", flush=True)
+    print(f"  监听 {a.bind}{'（只在本机；要手机/平板打开用 --bind 0.0.0.0）' if loopback else '（对局域网开放）'}", flush=True)
+    if not loopback:
+        print("  ⚠️ 头对局域网开放：同一网络里的设备都能打开这个页面。", flush=True)
+        print("     要收回本机：--bind 127.0.0.1；要拦人：核心设 LILARA_AUTH=1。", flush=True)
+
+    handler = make_handler(a.root, core, core_port)
+    httpd = ThreadingHTTPServer((a.bind, a.port), handler)
+    print(f"  服务器：python3 http.server on {a.bind}:{a.port}", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

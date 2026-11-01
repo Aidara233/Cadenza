@@ -28,16 +28,41 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Cadenza\serve.ps1
 |---|---|---|
 | 端口 | `-Port 17991`（或 `LILARA_HEAD_PORT`） | `--port 17991`（或 `LILARA_HEAD_PORT`） |
 | 核心地址 | `-Core http://…`（或 `LILARA_CORE`） | `--core http://…`（或 `LILARA_CORE`） |
+| 监听地址 | `-Bind 0.0.0.0`（或 `LILARA_HEAD_BIND`） | `--bind 0.0.0.0`（或 `LILARA_HEAD_BIND`） |
 | 根目录 | `-Root …` | `--root …` |
 | 跳过自检 / 不打开浏览器 | `-NoCheck` / `-NoOpen` | `--no-check` / `--no-open` |
 | 只开浏览器 | — | `--open-only` |
+
+**监听地址默认是 `127.0.0.1`（只在本机）。** 要对局域网开放是一条显式决定：
+
+```bash
+# 手机/平板要打开这个页面时才需要（核心的 LILARA_BIND 默认已经是 0.0.0.0）
+./serve.sh --bind 0.0.0.0
+powershell ... -File Cadenza\serve.ps1 -Bind 0.0.0.0
+```
+
+⚠️ **Windows 上多一步**：`serve.ps1` 走 `HttpListener`，绑回环之外的前缀需要一条 URL ACL，
+没有它 `Start()` 直接报「拒绝访问」（这台机器上实测如此）。先跑一次（管理员）：
+
+```
+netsh http add urlacl url=http://+:17990/ user=<你的用户名>
+```
+
+`serve.ps1` 在失败时会把这条命令原样打出来（带你的用户名），不会把它说成「端口被占」。
+macOS / Linux 上的 `php -S` / `python3` 没有这个概念，`--bind 0.0.0.0` 直接生效。
+
+`/config.json`（页面启动时读它拿核心地址）**跟着请求的 Host 走**：没显式给 `-Core` / `--core` 时，
+它交回「打开页面的那个地址 + 核心端口」。写死 `127.0.0.1` 的话，手机打开页面会去连**手机自己**——
+而症状与「核心没起来」完全一样。显式给了就照抄（核心在别的机器上 / 走了隧道，头不许改写它）。
 
 两个脚本都会**自动打开浏览器**（`--no-open` / `-NoOpen` 关掉）；自动化（e2e）就是靠这个开关
 避免在跑测试时弹出窗口。
 
 `serve.sh` **不内置** HTTP 服务器——它按顺序挑这台机器上现成的：
 `php -S`（最推荐，配 `serve-router.php` 关掉缓存）→ `python3`（配 `serve.py`，同样 no-store）
-→ `busybox httpd`（⚠️ 不关缓存）。三个都没有时它会明确说明装哪一个，而不是静默降级。
+→ `busybox httpd`（⚠️ 不关缓存，而且**没有 `/config.json`** ⇒ 页面退回默认核心地址
+`127.0.0.1:17988`，局域网里的别的设备会去连它自己。要用局域网就别落在 busybox 上）。
+三个都没有时它会明确说明装哪一个，而不是静默降级。
 
 > ⚠️ 发布的核心单文件**不含前端**：`Cadenza/` 目录要跟着一起分发（它本来就是零构建的静态文件）。
 > 头也可以指到别处的核心（`--core` / 页面 `?core=`）。跨机器时注意两件事：核心的 WS 白名单默认是
@@ -194,9 +219,9 @@ shell（`11-shell`：后台自检 → `standard` 档被拒且进程没起 → `t
 ```
 Cadenza/
 ├─ index.html          外壳：顶栏（视图 / 事件谱 / 等你 / 面板 / 连接）、横幅、四个视图、状态栏
-├─ serve.ps1           静态宿主 · Windows（127.0.0.1，no-store，启动时自检 WS 白名单）
+├─ serve.ps1           静态宿主 · Windows（默认 127.0.0.1，no-store，启动时自检 WS 白名单与鉴权）
 ├─ serve.sh            静态宿主 · macOS / Linux / WSL（同一份契约；挑现成的 php / python3 / busybox）
-├─ serve.py            serve.sh 的 python3 落点（no-store + /config.json）
+├─ serve.py            serve.sh 的 python3 落点（no-store + /config.json；--bind）
 ├─ serve-router.php    serve.sh 的 php -S 路由（只补 no-store 与 /config.json）
 ├─ css/  base · shell · stage · views
 ├─ js/
@@ -226,9 +251,10 @@ Cadenza/
 - 「工具结果是不是失败」是按结果文本里的关键字猜的（核心不给结构化状态），只影响颜色。
 - **默认没有鉴权**：核心不设 `LILARA_AUTH=1` 时，任何能连到 17988 的人/程序都能驱动它（模型、工具、本机可读文件）。
   页面这一侧不再假装安全：核心一开鉴权，401 会立刻弹 token 闸（见上面「访问 token」）。
-- **静态宿主仍只绑 127.0.0.1**（`serve.ps1` 的 `$prefix`、`serve.sh` 选中的服务器同理）：核心已经把白名单放开成
-  按端口认，但头没有 `--bind`，所以今天还是只有本机能打开页面。要在手机/平板上用，得先给头加一个监听地址参数
-  （核心自己的头已经默认 0.0.0.0，这件事在 Cadenza 这边还没做）。
+- **静态宿主默认只绑 `127.0.0.1`**，要对局域网开放得显式 `--bind 0.0.0.0` / `-Bind 0.0.0.0`
+  （Windows 上还要一条 URL ACL，见上面「监听地址」）。核心那边默认已经放开到 0.0.0.0 + 白名单按端口认，
+  但头只发静态文件，这个决定留给用户；一旦开了，`/config.json` 会跟着请求的 Host 走，
+  否则手机打开页面会去连自己。
 - **`serve.sh` 只在 Git Bash 上测过**它的分支逻辑（参数、自检、缺服务器提示）；它选中的三个服务器
   里，`serve.py` 与 `serve-router.php` **没有在 macOS / Linux 上真正跑过一次**（本机两者都没装）。
   首次在 Linux 上跑时请先看那两行「服务器：…」的输出对不对。
