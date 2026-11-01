@@ -65,11 +65,10 @@ ROOT="$(cd "$ROOT" 2>/dev/null && pwd)" || { echo "✗ --root 不存在：'$ROOT
 
 URL="http://127.0.0.1:$PORT"
 
-# ⚠️ 浏览器用 localhost 打开时 origin 是 http://localhost:…，与白名单**不是同一个**
-# （按浏览器的判法）⇒ 握手 403，而浏览器不会把 403 交给页面 JS。所以两边都只说 127.0.0.1。
+# ⚠️ 判据是**模式**：核心 2026-11-05 起默认放行 `http://*:<头端口>`（任意主机，端口钉住），
+# 所以 localhost / 127.0.0.1 / 局域网 IP 打开都行——逐字相等会把这些全部误报成「不吻合」。
 open_browser() {
     [ "$OPEN" = "1" ] || return 0
-    # 只用本机回环地址打开——见上面那段。
     if command -v xdg-open >/dev/null 2>&1; then xdg-open "$URL/" >/dev/null 2>&1 &
     elif command -v open >/dev/null 2>&1; then open "$URL/" >/dev/null 2>&1 &
     elif command -v cmd.exe >/dev/null 2>&1; then cmd.exe //c start "" "$URL/" >/dev/null 2>&1 &
@@ -78,10 +77,10 @@ open_browser() {
 }
 
 echo "CADENZA — $URL"
-echo "  页面 origin $URL（核心 WS 白名单需包含它）"
+echo "  页面 origin 必须落在核心的白名单上（默认模式 http://*:$PORT = 任意主机 + 这个端口）"
 echo "  核心 $CORE（页面直连；可用 ?core= 或「后台 · 系统」覆盖）"
 echo "  根目录 $ROOT"
-echo "  ⚠️ 请用 127.0.0.1 打开——localhost 不是同一个 origin，握手会被静默拒绝。"
+echo "  端口必须是 $PORT；主机名/地址随意（127.0.0.1、localhost 都行——核心按端口放行）"
 echo ""
 
 if [ "$OPEN_ONLY" = "1" ]; then OPEN=1; open_browser; echo "  已在浏览器打开 $URL/"; exit 0; fi
@@ -92,12 +91,26 @@ if [ "$CHECK" = "1" ] && command -v curl >/dev/null 2>&1; then
     if [ -z "$info" ]; then
         echo "  ⚠️ 核心没应答（$CORE）"
         echo "     页面会显示「已断开 · 重连中」。先把核心起起来。"
-    elif printf '%s' "$info" | grep -q "\"allowedOrigin\":\"$URL\""; then
-        echo "  ✓ 核心在，WS 白名单 = $URL"
     else
         allowed="$(printf '%s' "$info" | sed -n 's/.*"allowedOrigin":"\([^"]*\)".*/\1/p')"
-        echo "  ⚠️ 核心在，但白名单是 ${allowed:-?} —— 页面 origin 是 $URL"
-        echo "     浏览器不会把握手 403 交给页面 JS。设 LILARA_HEAD_PORT=$PORT 后重启核心。"
+        # case 的模式里 `*` 是通配（这正是我们要的语义：任意主机 + 这个端口），
+        # 引号里的 `*` 才是字面量（核心把白名单设成 `*` = 放行任意 origin，仅调试用）。
+        case "$allowed" in
+            "$URL"|"*"|http://*:"$PORT") ok=1 ;;
+            *) ok=0 ;;
+        esac
+        if [ "$ok" = "1" ]; then
+            echo "  ✓ 核心在，WS 白名单 = $allowed"
+        else
+            echo "  ⚠️ 核心在，但白名单是 ${allowed:-?} —— 页面 origin 是 $URL"
+            echo "     浏览器不会把握手 403 交给页面 JS。设 LILARA_HEAD_PORT=$PORT 后重启核心。"
+        fi
+        # 开了鉴权而页面不知道 = 「页面一片空白，没人说得出为什么」。token 只在核心的控制台里，
+        # 这里只指路、不复述。
+        if printf '%s' "$info" | grep -Fq '"authRequired":true'; then
+            echo "  ⚠️ 核心开了鉴权（LILARA_AUTH=1）：页面第一次连会要 token。"
+            echo "     token 在核心的控制台启动横幅里（访问 token … 那一行）。"
+        fi
     fi
 elif [ "$CHECK" = "1" ]; then
     echo "  ⚠️ 没有 curl，跳过启动自检（页面连不上时先看核心是否在 $CORE）"

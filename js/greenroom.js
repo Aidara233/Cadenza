@@ -1,6 +1,7 @@
 // Cadenza · green room — providers, presets, system self-check.
 import { h, swap, clear, toast, confirmDlg, modal, jsonBlock, store, copy, fmtNum } from "./util.js";
 import { app, cmd, refreshProviders, refreshPresets, refreshNetwork, refreshShell, loadRegistries } from "./model.js";
+import { originMatches, describeOrigin } from "./core.js";
 
 const G = { root: null, tab: store.get("grTab", "providers"), body: null };
 
@@ -374,26 +375,64 @@ async function shell(root) {
 async function system(root) {
   await loadRegistries();
   const i = app.info || {}, hl = app.health || {};
-  const originOk = !i.allowedOrigin || i.allowedOrigin === location.origin;
+  // ⚠️ 判据是**模式匹配**（核心默认 `http://*:<头端口>`）：逐字相等会把正确配置判成「不吻合」，
+  // 而那正是让人去改一个本来正确的设置的最短路径。
+  const originOk = !i.allowedOrigin || originMatches(i.allowedOrigin, location.origin);
+  const originWild = (i.allowedOrigin || "").includes("*") && i.allowedOrigin !== "*";
   const coreInp = h("input.inp.mono", { value: app.core.base, "aria-label": "核心地址" });
+  const tokenInp = h("input.inp.mono", {
+    type: "text", autocomplete: "off", spellcheck: "false",
+    value: app.core.token, placeholder: app.core.token ? "" : "未填（核心开了鉴权才需要）",
+    "aria-label": "访问 token",
+  });
+  const saveToken = () => {
+    app.core.setToken(tokenInp.value.trim());
+    location.reload();   // 换 token 要重连整条链路（WS 的 token 在 URL 里，改不了）
+  };
   root.append(h("div.sys-grid",
     h("section.card",
       h("div.card-h", h("h3", "核心"), h("span.sp"), hl.ok ? h("span.chip.green", "健康") : h("span.chip.red", "没应答")),
       h("div.kv",
         kvr("版本", h("code", i.coreVersion || "—")),
-        kvr("数据根", h("code", i.dataRoot || "—")),
-        kvr("工作目录", h("code", i.workingDirectory || "—")),
+        // ⚠️ 开了鉴权而没带对 token 时，这两格**核心根本不给**（未授权的 `/info` 只交最小一格，
+        // 本机绝对路径不白送给局域网里的陌生人）——所以「—」在这里不是「没有数据根」。
+        kvr("数据根", h("code", i.dataRoot || (i.authRequired ? "（未授权，核心不交）" : "—"))),
+        kvr("工作目录", h("code", i.workingDirectory || (i.authRequired ? "（未授权，核心不交）" : "—"))),
+        kvr("鉴权", i.authRequired
+          ? h("span", h("span.chip.green", "开"),
+            app.core.token ? h("span.dim", " 已带 token") : h("span.dim", " 这个页面还没带 token"))
+          : h("span.dim", "关（默认放行：能连上这个端口的人都能驱动核心）")),
         kvr("内存里的会话", h("span.num", fmtNum(hl.sessions))),
-        kvr("HTTP", h("code", i.endpoints?.http || app.core.base)),
-        kvr("WS", h("code", i.endpoints?.ws || app.core.wsUrl)),
+        // ⚠️ 这两行印的是**这个页面实际在用的地址**，不是 `/info.endpoints`：核心默认绑 0.0.0.0 之后
+        // 它交出来的就是 `http://0.0.0.0:17989`，而 `0.0.0.0` 不是一个能连的地址——印它只会让
+        // 人拿一个连不上的 URL 去排错。
+        kvr("HTTP", h("code", app.core.base)),
+        kvr("WS", h("code", app.core.wsUrl.replace(/\?token=.*$/, ""))),
         kvr("帧统计", h("span.num", `收 ${app.core.stats.in} · 发 ${app.core.stats.out}`)))),
+    h("section.card",
+      h("div.card-h", h("h3", "访问 token"), h("span.sp"),
+        i.authRequired ? h("span.chip.green", "核心在校验") : h("span.chip", "核心不校验")),
+      h("p.dim", "核心设了 ", h("code", "LILARA_AUTH=1"),
+        " 才校验。token 每次启动重新生成，打印在核心的控制台启动横幅里（", h("code", "访问 token …"), " 那一行）。"),
+      h("div.row", tokenInp, h("button.btn.btn-sm", { type: "button", onclick: saveToken }, "保存并重载"),
+        h("button.btn.btn-sm.btn-ghost", { type: "button", onclick: () => { tokenInp.value = ""; saveToken(); } }, "清除")),
+      h("p.dim.mt", "两种交法都是核心定的：HTTP 走 ", h("code", "Authorization: Bearer"), "，"
+        + "WebSocket 走 ", h("code", "?token="), "（浏览器的 WebSocket 不能自定义请求头）。"
+        + "图片这类 ", h("code", "<img src>"), " 只能走查询参数。"),
+      h("p.dim", "⚠️ 控制面是明文 HTTP：token 拦得住随手连上来的人，挡不住同一网段里的嗅探者。")),
     h("section.card" + (originOk ? "" : ".card-bad"),
       h("div.card-h", h("h3", "WS 白名单"), h("span.sp"), originOk ? h("span.chip.green", "吻合") : h("span.chip.red", "不吻合")),
-      h("div.kv", kvr("核心放行", h("code", i.allowedOrigin || "—")), kvr("本页 origin", h("code", location.origin))),
+      h("div.kv",
+        kvr("核心放行", h("code", i.allowedOrigin || "—")),
+        kvr("含义", h("span.dim", i.allowedOrigin ? describeOrigin(i.allowedOrigin) : "—")),
+        kvr("本页 origin", h("code", location.origin))),
       originOk ? h("p.dim.mt", "浏览器握手会被核心接受。") : h("div.mt",
         h("p", "核心会静默拒绝本页的 WS 握手（浏览器拿不到 403 的原因）。两条路："),
         h("ol",
-          h("li", "用 ", h("code", i.allowedOrigin), " 打开本页（注意 localhost ≠ 127.0.0.1）"),
+          originWild
+            ? h("li", "换个端口打开本页：核心只认端口 ", h("code", (i.allowedOrigin || "").split(":").pop()),
+              "，主机名/地址随便（局域网 IP、localhost 都行）")
+            : h("li", "用 ", h("code", i.allowedOrigin), " 打开本页（注意 localhost ≠ 127.0.0.1）"),
           h("li", "或让核心放行本页：设 ", h("code", "LILARA_ALLOWED_ORIGIN=" + location.origin), " 后重启核心")))),
     h("section.card",
       h("div.card-h", h("h3", "核心地址")),

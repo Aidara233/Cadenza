@@ -1,6 +1,7 @@
 // Cadenza · blocks — render Block[] (text / reasoning / toolUse / image / store).
 import { h, prettyJson, highlightJson, esc } from "./util.js";
 import { md } from "./md.js";
+import { coreToken, TOKEN_PARAM } from "./core.js";
 
 const TOOL_GLYPH = {
   read: "◎", ls: "☰", search: "⌕", write: "✎", update: "✎", delete: "✕", mkdir: "▣", path: "⌖",
@@ -167,7 +168,14 @@ let coreBase = "";
 /** 核心地址（不带尾斜杠）。`app.js` 在 boot 时调一次。 */
 export function setCoreBase(base) { coreBase = (base || "").replace(/\/+$/, ""); }
 
-const storeUrl = (sha) => `${coreBase}/store/${encodeURIComponent(sha || "")}`;
+// ⚠️ **图片与库链接只能走查询参数带 token**：`<img src>` / `<a href>` 都没法自定义请求头
+//（核心的 `IsAuthorized` 两种交法都认，就是为了这一格）。⇒ 这里读的是**当下**那份 token，
+// 不是 boot 时那一份——后台里换过 token 之后重新渲染出来的图，才该是能取回的。
+const storeUrl = (sha) => {
+  const t = coreToken();
+  return `${coreBase}/store/${encodeURIComponent(sha || "")}`
+    + (t ? `?${TOKEN_PARAM}=${encodeURIComponent(t)}` : "");
+};
 
 export function storeBlock(b) {
   // ⚠️ **图片显示的是那张图本身**：核心的 `GET /store/{sha256}` 就是为这一格开的

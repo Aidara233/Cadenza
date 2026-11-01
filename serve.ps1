@@ -1,9 +1,9 @@
 ﻿# CADENZA — static head server.
 #
 # The Lilara core only accepts WebSocket handshakes whose Origin matches its
-# whitelist (default http://127.0.0.1:17990). This listener serves the Cadenza
-# folder on exactly that origin, with no browser caching (a page + three dozen
-# modules is the same trap the reference head documented three times).
+# whitelist (default: the PATTERN http://*:17990 - any host, that port). This
+# listener serves the Cadenza folder, with no browser caching (a page + three
+# dozen modules is the same trap the reference head documented three times).
 #
 # No dependencies: System.Net.HttpListener ships with Windows PowerShell.
 #
@@ -52,21 +52,30 @@ $types = @{
 }
 
 Write-Host "CADENZA — http://127.0.0.1:$Port"
-Write-Host "  页面 origin http://127.0.0.1:$Port（核心 WS 白名单需包含它）"
+Write-Host "  页面 origin 必须落在核心的白名单上（默认模式 http://*:$Port = 任意主机 + 这个端口）"
 Write-Host "  核心 $Core（页面直连；可用 ?core= 或「后台 · 系统」覆盖）"
 Write-Host "  根目录 $Root"
-Write-Host "  ⚠️ 请用 127.0.0.1 打开——localhost 不是同一个 origin，握手会被静默拒绝。"
+Write-Host "  端口必须是 $Port；主机名/地址随意（127.0.0.1、localhost 都行——核心按端口放行）"
 Write-Host ""
 
 # Startup check: say out loud what the fatal-but-silent failure is.
 if (-not $NoCheck) {
     try {
         $info = Invoke-RestMethod -Uri "$Core/info" -TimeoutSec 2 -ErrorAction Stop
-        if ($info.allowedOrigin -eq "http://127.0.0.1:$Port") {
-            Write-Host "  ✓ 核心在，WS 白名单 = $($info.allowedOrigin)" -ForegroundColor Green
+        $allowed = "$($info.allowedOrigin)"
+        # ⚠️ 核心 2026-11-05 起默认白名单是**模式** `http://*:<头端口>`（任意主机，端口钉住）。
+        # 逐字比较会把一次正确的配置报成「不吻合」，而那句警告会把人推去改一个本来对的设置。
+        if ($allowed -eq "http://127.0.0.1:$Port" -or $allowed -eq "http://*:$Port" -or $allowed -eq "*") {
+            Write-Host "  ✓ 核心在，WS 白名单 = $allowed" -ForegroundColor Green
         } else {
-            Write-Host "  ⚠️ 核心在，但白名单是 $($info.allowedOrigin) —— 页面 origin 是 http://127.0.0.1:$Port" -ForegroundColor Yellow
+            Write-Host "  ⚠️ 核心在，但白名单是 $allowed —— 页面 origin 是 http://127.0.0.1:$Port" -ForegroundColor Yellow
             Write-Host "     浏览器不会把握手 403 交给页面 JS。设 LILARA_HEAD_PORT=$Port 后重启核心。"
+        }
+        # 开了鉴权而页面不知道 = 「页面一片空白，没人说得出为什么」。token 只在核心的控制台里
+        # （头是独立进程，拿不到也不该去读），所以这里只指路、不复述。
+        if ($info.authRequired -eq $true) {
+            Write-Host "  ⚠️ 核心开了鉴权（LILARA_AUTH=1）：页面第一次连会要 token。" -ForegroundColor Yellow
+            Write-Host "     token 在核心的控制台启动横幅里（访问 token … 那一行）。"
         }
     } catch {
         Write-Host "  ⚠️ 核心没应答（$Core）：$($_.Exception.Message)" -ForegroundColor Yellow

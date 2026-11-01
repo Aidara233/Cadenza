@@ -47,6 +47,8 @@ async function boot() {
   });
   app.core.on("reconnected", async () => { await loadRegistries(); scheduleRefresh(10); });
   app.core.on("badframe", (f) => toast("核心说帧形状不对：" + f.reason, "err"));
+  // 核心要 token 而这次没带对（或缺）⇒ 铺一层闸。`hadToken` 只影响闸上那句原因的说法。
+  app.core.on("auth", (d) => openTokenGate(d.reason));
 
   const initial = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : store.get("view", "stage");
   go(initial, true);
@@ -55,6 +57,11 @@ async function boot() {
 
   const info = await app.core.probe();
   if (!info) showBanner("down");
+  // 开了鉴权而页面还没带对 token ⇒ 立刻铺闸，别让人对着一张「已断开」的空页面猜。
+  // ⚠️ 判据是 `/info.authRequired`（未授权时它**照样回 200**，只是少了本机路径那几格）。
+  if (app.core.authRequired && !app.core.token) {
+    openTokenGate("核心开了鉴权（LILARA_AUTH=1），这个页面还没有 token");
+  }
   app.core.subscribe("approvals");
   app.core.connect();
   await loadRegistries();
@@ -88,12 +95,13 @@ function go(view, initial = false) {
 function onStatus(s) {
   const el = $("#conn");
   el.dataset.state = s;
-  el.querySelector(".conn-text").textContent = { open: "已连接", connecting: "连接中", closed: "已断开", origin: "被拒握手" }[s] || s;
-  el.title = app.core.wsUrl;
+  el.querySelector(".conn-text").textContent = { open: "已连接", connecting: "连接中", closed: "已断开", origin: "被拒握手", auth: "要 token" }[s] || s;
+  el.title = app.core.wsUrl.replace(/\?token=.*$/, "?token=…");
   if (s === "open") { hideBanner(); }
   else if (s === "origin") showBanner("origin");
+  else if (s === "auth") showBanner("auth");
   else if (s === "closed") showBanner(app.core.info ? "ws" : "down");
-  if (s === "closed" || s === "origin") resetSubscriptions();
+  if (s === "closed" || s === "origin" || s === "auth") resetSubscriptions();
   renderStatus();
 }
 
@@ -101,11 +109,26 @@ function showBanner(kind) {
   const b = $("#banner");
   const i = app.core.info;
   if (kind === "origin") {
+    const pat = i?.allowedOrigin || "?";
+    // ⚠️ 白名单现在是**模式**（核心默认 `http://*:<头端口>`）：通配主机时「换到那个地址打开」
+    // 是个不存在的地址，说了等于没说。那时唯一的判据是**端口**。
+    const wild = pat.includes("*") && pat !== "*";
+    const wantPort = wild ? pat.split(":").pop() : "";
+    const myPort = location.port || (location.protocol === "https:" ? "443" : "80");
     swap(b, h("b", "核心拒绝了本页的 WS 握手。"),
-      h("span", " 它只放行 ", h("code", i.allowedOrigin), "，本页是 ", h("code", location.origin), "。"),
+      wild
+        ? h("span", " 它只放行端口 ", h("code", wantPort), " 的页面，本页端口是 ", h("code", myPort), "。")
+        : h("span", " 它只放行 ", h("code", pat), "，本页是 ", h("code", location.origin), "。"),
       h("span.sp"),
-      h("a", { href: i.allowedOrigin + location.pathname + location.hash }, "换到那个地址打开"),
+      wild
+        ? h("span.dim", "换个端口打开本页")
+        : h("a", { href: pat + location.pathname + location.hash }, "换到那个地址打开"),
       h("span.dim", "  或设 LILARA_ALLOWED_ORIGIN 后重启核心"));
+  } else if (kind === "auth") {
+    swap(b, h("b", "核心要求访问 token。"),
+      h("span", " 它开了鉴权（", h("code", "LILARA_AUTH=1"), "）：token 在核心的控制台启动横幅里（", h("code", "访问 token …"), " 那一行）。"),
+      h("span.sp"),
+      h("button.btn.btn-sm", { type: "button", onclick: () => openTokenGate("") }, "填 token"));
   } else if (kind === "down") {
     swap(b, h("b", "核心没应答。"), h("span", " 正在重连 ", h("code", app.core.base), "……先把核心起起来（", h("code", "dotnet run"), "）。"), h("span.sp"), h("button.btn.btn-sm", { type: "button", onclick: () => go("greenroom") }, "换核心地址"));
   } else {
@@ -114,6 +137,44 @@ function showBanner(kind) {
   b.hidden = false;
 }
 function hideBanner() { $("#banner").hidden = true; }
+
+// ---- 访问 token 闸（核心 `LILARA_AUTH=1` 时才出现）----
+//
+// ⚠️ 铺满整屏而不是一个小框：这一刻**没有任何数据可信**（快照、订阅、历史分页全被拒），
+// 底下那些按钮点下去只会再弹一次闸。
+// ⚠️ 存下之后**整页重载**：此刻所有快照与订阅都按「未授权」拿过一遍，逐条补一遍比不上
+// 重新引导一次可靠（核心自己那个页面也是这么做的）。
+// ⚠️ 留一个「先不填」：没 token 的人也有权去后台看看 `/info` 说了什么、换个核心地址，
+// 或者清掉一份存错的 token——把唯一的出口焊死，只会让人去清 localStorage。
+function openTokenGate(detail) {
+  if ($("#token-gate")) return;
+
+  const input = h("input.inp.mono", {
+    type: "text", autocomplete: "off", spellcheck: "false",
+    placeholder: "粘在这里", "aria-label": "访问 token",
+  });
+  const close = () => $("#token-gate")?.remove();
+  const form = h("form.gate-card", {
+    onsubmit: (e) => {
+      e.preventDefault();
+      app.core.setToken(input.value.trim());
+      close();
+      location.reload();
+    },
+  },
+    h("h2.gate-title", "核心要求访问 token"),
+    h("p.gate-text", "核心启动时把它打印在控制台里（", h("code", "访问 token …"), " 那一行）。"),
+    h("p.gate-note", "开了鉴权（", h("code", "LILARA_AUTH=1"), "）才会要它；留空保存 = 清掉已存的那份。"),
+    input,
+    // 原因是**上次为什么被拒**，不是一句通用的提示：token 错与没 token 得分开说。
+    detail ? h("p.gate-bad", detail) : null,
+    h("div.gate-actions",
+      h("button.btn.btn-ghost", { type: "button", onclick: close }, "先不填"),
+      h("button.btn.btn-primary", { type: "submit" }, "保存并重连")));
+
+  document.body.appendChild(h("div.token-gate#token-gate", form));
+  input.focus();
+}
 
 function renderCueBtn() {
   const n = app.approvals.size;
@@ -140,6 +201,8 @@ function renderStatus() {
     h("span.sb-item", "Cadenza ", h("b", VERSION)),
     h("span.sb-item", "核心 ", h("b", app.core?.base || "—")),
     i ? h("span.sb-item", "v", h("b", i.coreVersion)) : null,
+    // 只在核心说「要 token」时才占一格——默认不校验的核心上多一格就是噪音。
+    i?.authRequired ? h("span.sb-item", "鉴权 ", h("b", app.core.token ? "已带" : "要 token")) : null,
     h("span.sb-item", "会话 ", h("b", fmtNum(rows.length)), " · 在内存 ", h("b", fmtNum(active)), " · 演奏中 ", h("b", fmtNum(running))),
     h("span.sb-item", "提供商 ", h("b", fmtNum(app.providers.length))),
     h("span.sp"),
