@@ -27,6 +27,9 @@ param(
     # 没有它 Start() 报「拒绝访问」。那种情况下本脚本**不会就地死掉**——它会印出那条
     # netsh 命令，然后**退回仅本机**接着服务（页面在本机能用，手机连不上，横幅里说清楚）。
     # 核心自己的头不需要这一步：Kestrel 不经过 http.sys。
+    # ⚠️ **加了那条 `+` 的保留之后，`-Bind 127.0.0.1` 会反而绑不上**（本机实测）：http.sys
+    # 让 `http://+:端口/` 可用，却拒绝同一端口上更具体的 `http://127.0.0.1:端口/`。
+    # 要回环就把那条保留删掉（netsh http delete urlacl），别两个都要。
     [string]$Bind = "0.0.0.0",
     # 2026-10-23：与 serve.sh 的 --no-check / --no-open 对齐。默认会自检并打开浏览器；
     # 自动化（e2e、脚本拉起）用这两个开关关掉。
@@ -75,17 +78,53 @@ function Get-CoreForRequest($req) {
     return "http://${hostPart}:$corePort"
 }
 
-# 绑不上时的那句话——回环与非回环的失败**长得一样，处理方式完全不同**，
-# 所以这句措辞要跟着「想要的那个地址」走，不能一律说成「端口被占」。
+# 绑不上时的那句话——回环与非回环、有没有 URL 保留，**修法完全不同**，
+# 所以这句措辞得跟着原因走，不能一律说成「端口被占」。
 # ⚠️ 异常文本要**传进来**：函数里的 `$_` 不是 catch 的那个 `$_`。
-function Write-BindFailure($why, $message) {
+function Show-BindFailure($message, $trouble) {
     Write-Host "✗ Cadenza 起不来（$prefix）：$message" -ForegroundColor Red
-    if ($why -eq "loopback") {
+    if ($trouble) {
+        Write-Host "  $trouble" -ForegroundColor Yellow
+        if ($trouble -match 'URL 保留') {
+            Write-Host "  要么就绑 +（不加 -Bind 就是它）；要么删掉那条保留再绑 127.0.0.1（管理员）：" -ForegroundColor Yellow
+            Write-Host "      netsh http delete urlacl url=http://+:$Port/" -ForegroundColor Cyan
+            Write-Host "  注意：删掉之后默认值（0.0.0.0 / +）反而需要一条 ACL 才能绑。"
+        }
+        return
+    }
+    if ($isLoopback) {
         Write-Host "  端口被占或落在 Windows 保留段。换个端口：-Port 17991，并设 LILARA_HEAD_PORT=17991 后重启核心。"
     } else {
         Write-Host "  绑回环之外的地址需要一个管理员身份或一条 URL ACL。要真的对局域网开放，先跑一次（管理员）："
         Write-Host "      netsh http add urlacl url=http://+:$Port/ user=$env:USERNAME" -ForegroundColor Cyan
     }
+}
+
+# 这个端口上到底出了什么事——**必须查清才说话**。
+#
+# ⚠️ Windows 上有个反直觉的事实（本机实测，2026-11-05）：一旦有人给某个端口加了
+# `http://+:端口/` 的 URL 保留，`http://127.0.0.1:端口/` 就**绑不上**了（拒绝访问），
+# 只有 `+` 能绑。于是「绑不上」至少有三种完全不同的原因，修法也完全不同：
+#   · 没有保留 + 没人在听 ⇒ 就是缺 ACL（加一条，或者退回本机）；
+#   · 有保留 ⇒ `+` 能用、loopback 不能；要 loopback 必须**删掉**那条保留；
+#   · 已经有一个实例在跑 ⇒ 关掉它。
+# 一律说成「端口被占」会把人推去改端口，而真正该做的是上面第二/第三条。
+function Get-PortTrouble($p) {
+    $acl = ""
+    try { $acl = (netsh http show urlacl url=http://+:${p}/ 2>$null) -join "`n" } catch { }
+    if ($acl -match 'http://\+:') {
+        $who = ""
+        if ($acl -match 'User:\s*(.+)') { $who = $Matches[1].Trim() }
+        $detail = if ($who) { "（属于 $who）" } else { "" }
+        return "端口 $p 上有一条 URL 保留 http://+:${p}/${detail}：它允许绑 +，但会让 http://127.0.0.1:${p}/ 被拒绝（Windows 的规矩）。"
+    }
+    try {
+        $conn = @(Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue)
+        if ($conn.Count -gt 0) {
+            return "端口 $p 上已经有人在监听（PID $($conn[0].OwningProcess)）——大概是一个还在跑的 Cadenza，先把它关掉。"
+        }
+    } catch { }
+    return $null
 }
 
 $listeningOn = $Bind
@@ -97,11 +136,13 @@ try {
     # ⚠️ 取 InnerException：外层那句「使用“0”个参数调用“Start”时发生异常」只是壳，
     # 真正要印给用户看的是里面那句「拒绝访问。」/「端口已被占用」。
     $bindError = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
-    if (-not $isLoopback) {
-        # ⚠️ 不动 ACL 的机器上（实测就是这台）默认值会撞上这条：**退回仅本机**而不是退出。
-        # 默认值不该把「能用」变成「起不来」；手机连不上这件事由横幅说清楚，别让人对着
-        # 一行「拒绝访问」自己猜是端口还是权限。
-        $aclBlocked = $true
+    $trouble = Get-PortTrouble $Port
+
+    # ⚠️ **只在「单纯缺 ACL」时退回本机**：有 URL 保留时 loopback 一定被拒（见上面 Get-PortTrouble），
+    # 硬退回去只会把一条清楚的诊断变成两句一样的「拒绝访问」。
+    if (-not $isLoopback -and -not $trouble) {
+        # 默认值不该把「能用」变成「起不来」；手机连不上这件事由横幅说清楚，
+        # 别让人对着一行「拒绝访问」自己猜是端口还是权限。
         $listener = [System.Net.HttpListener]::new()
         $listener.Prefixes.Add("http://127.0.0.1:$Port/")
         $prefix = "http://127.0.0.1:$Port/"
@@ -109,13 +150,15 @@ try {
         $listeningOn = "127.0.0.1"
         try {
             $listener.Start()
+            $aclBlocked = $true
         } catch {
             $inner = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
-            Write-BindFailure "loopback" $inner
+            Show-BindFailure $inner $null
+            Write-Host "      （想绑 $Bind 也没成：$bindError——多半就是缺那条 URL ACL）" -ForegroundColor DarkYellow
             exit 1
         }
     } else {
-        Write-BindFailure "loopback" $bindError
+        Show-BindFailure $bindError $trouble
         exit 1
     }
 }
