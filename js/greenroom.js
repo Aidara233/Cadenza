@@ -52,6 +52,11 @@ function provCard(p) {
       // 一次模型调用的超时。⚠️ 没配时这个键根本不进 /providers（与 endpoint / authScheme 同一族），
       // 所以不能 `p.timeoutSeconds || 100` —— 那会显示一个用户从没配过的数字。
       kvr("缓存断点", p.cacheMode ? h("code", p.cacheMode) : h("span.dim", "(默认 auto)")),
+      // 流式输出（核心 2026-11）。旧核心不发这个字段 ⇒ 说「不支持」，
+      // 别把它显示成「关」（那会让人以为是自己关掉的）。
+      kvr("流式输出", p.streaming == null
+        ? h("span.dim", "核心不支持（旧版）")
+        : p.streaming ? h("span.chip.green", "开") : h("span.dim", "关")),
       kvr("调用超时", p.timeoutSeconds ? h("span.num", `${p.timeoutSeconds} 秒`) : h("span.dim", "(默认)"))),
     result,
     modelResult,
@@ -110,6 +115,15 @@ function provForm(p) {
     h("option", { value: "" }, "(默认 auto)"),
     ...(sc.cacheModes || ["auto", "explicit"]).map((v) => h("option", { value: v }, v)));
   if (p?.cacheMode) cache.value = p.cacheMode;
+  // 流式输出（核心 2026-11）：**三态**——`(默认)` / 开 / 关，与超时同一条语义（不发这个键 =
+  // 保留旧值）。⚠️ 它的默认是「关」（既有行为，关着时请求体与之前逐字节相同）。
+  // ⚠️ 旧核心根本没有这个键：选了也没用，但也不会报错——核心的 upsert 只认它认识的字段，
+  // 而在那种核心上「(默认)」正是我们想让它保持的样子。
+  const stream = h("select.sel", { "aria-label": "流式输出" },
+    h("option", { value: "" }, "(默认)"),
+    h("option", { value: "on" }, "开 · 逐字显示（增量只在内存，步末落盘）"),
+    h("option", { value: "off" }, "关 · 一次给完整回复"));
+  if (p) stream.value = p.streaming ? "on" : "off";
   const err = h("div.form-err", { role: "alert" });
   const form = h("form", { novalidate: true },
     h("label.field", h("span", h("b", "id")), id, isNew && sc.providerIdRule ? h("span.hint", sc.providerIdRule) : null),
@@ -122,6 +136,9 @@ function provForm(p) {
     h("label.field", h("span", "调用超时（秒）"), timeout,
       // 区间（1..1800）今天不在 /provider-schema 上，所以头不手抄数字——越界由核心的 reason 显示。
       h("span.hint", "一次模型调用最多等多久（不是一步，也不是询问超时；试音另有固定 10 秒预算）。留空 = 协议默认，清空不会清掉已配的值。")),
+    h("label.field", h("span", "流式输出"), stream,
+      h("span.hint", "开 = 上游一吐字就显示（核心按约 50ms 攒批转发增量）。⚠️ 增量只供显示：它不进记录、断线不补发，"
+        + "而一旦吐过字，这一次调用就不再重试（重发会把同一段话在屏幕上再打一遍）。关 = 一次给完整回复，请求体因此与开启之前逐字节相同。")),
     err,
     h("div.dlg-actions", h("button.btn.btn-ghost", { type: "button", onclick: () => m.close() }, "取消"), h("button.btn.btn-primary", { type: "submit" }, isNew ? "加入乐团" : "保存")));
   const m = modal(isNew ? "新提供商" : "编辑 " + p.id, form);
@@ -148,6 +165,10 @@ function provForm(p) {
     }
     // 缓存断点：与超时同一条「只在变了才发」。选「(默认)」发 auto（= 不标记），这样能回退。
     if ((cache.value || "auto") !== (p?.cacheMode || "auto")) payload.cacheMode = cache.value || "auto";
+    // 流式输出：三态。(默认) ⇒ **不发这个键**（= 保留旧值，与 timeoutSeconds 同一条语义）；
+    // 选了开/关就照发（幂等，重复发成同一个值没有副作用）。
+    if (stream.value === "on") payload.streaming = true;
+    else if (stream.value === "off") payload.streaming = false;
     const ack = await app.core.command(payload);
     if (!ack.accepted) { err.textContent = ack.reason; return; }
     m.close();

@@ -8,7 +8,7 @@
 
 param(
     [string]$CoreExe = "",
-    [string[]]$Scripts = @("1-boot", "2-flow", "3-asks-axes", "4-views-layout", "6-mixer-fit", "7-sync", "8-search", "9-network", "10-goal", "11-shell", "12-provider-timeout", "13-subagents", "14-jobs", "15-archive", "16-images"),
+    [string[]]$Scripts = @("1-boot", "2-flow", "3-asks-axes", "4-views-layout", "6-mixer-fit", "7-sync", "8-search", "9-network", "10-goal", "11-shell", "12-provider-timeout", "13-subagents", "14-jobs", "15-archive", "16-images", "18-streaming"),
     [string]$Work = (Join-Path $env:TEMP "cadenza-e2e"),
     # -Auth starts the core with LILARA_AUTH=1, reads the token out of its startup banner and
     # substitutes @TOKEN@ in the step scripts. Such a core rejects every anonymous request, so

@@ -1,0 +1,48 @@
+# 流式输出（核心 `3819e74` 之后：提供商级开关 + `term.delta` 增量）
+#
+# ⚠️ 这一条要**真核心 + 真 SSE 上游**：`mock.cs` 在请求带 `"stream": true` 时按 SSE 分片回，
+# 核心再把增量转发成 `term.delta`。假数据验不出这条链——交法（`data:` 帧 / `[DONE]` /
+# 参数分片拼接）错一点，页面上就是「没有流式」或者「工具卡不见了」。
+# ⚠️ 每个 step 必须**一行**（cdp.cs 按行读，多行 eval 会被截成半句）。
+goto http://127.0.0.1:17994/?core=http://127.0.0.1:17989
+until !!window.cadenza && document.querySelector('#conn').dataset.state === 'open' ;; 15000
+logs
+# 提供商：开流式（`provider.upsert` 的 `streaming`）。端点指向 mock（它会按 SSE 回）。
+eval (async () => { const ack = await cadenza.core.command({ kind: 'provider.upsert', id: 'mock', apiKey: 'sk-test', model: 'mock-flash', protocol: 'openai-chat', endpoint: 'http://127.0.0.1:15799', streaming: true }); await (await import('./js/model.js')).loadRegistries(); return ack.accepted + ':' + (ack.reason || ''); })()
+# 卡上要看得出「开」——开关写在提供商上，不是会话上
+eval cadenza.bus.emit('goto', 'greenroom')
+until /流式输出/.test(document.querySelector('#view-greenroom')?.textContent || '') ;; 8000
+expect [...document.querySelectorAll('.kv-row')].some(r => /流式输出/.test(r.querySelector('.kv-k')?.textContent || '') && /开/.test(r.querySelector('.kv-v')?.textContent || ''))
+eval cadenza.bus.emit('goto', 'stage')
+wait 300
+# 造一场会话并真的发一句（走命令通道，与输入框同一条路）
+eval (async () => { const ack = await cadenza.core.command({ kind: 'session.create', title: '流式探针' }); window.__sid = ack.sessionId || ''; return ack.accepted + ':' + (ack.sessionId || ack.reason || ''); })()
+until (window.__sid || '').length > 8 ;; 15000
+eval (async () => { const { setCurrent } = await import('./js/model.js'); setCurrent(window.__sid); return 1; })()
+until !!document.querySelector('.score-h .sh-meta') ;; 10000
+# 「流式」不命中 mock 的任何关键词分支 ⇒ 走默认那段带 reasoning 的长回复
+eval (async () => { const ack = await cadenza.core.command({ kind: 'session.send', sessionId: window.__sid, blocks: [{ kind: 'text', text: '流式' }] }); return ack.accepted; })()
+# 临时气泡先出现：它**不是**事实，只是「模型正在说」的样子
+until !!document.querySelector('.msg.live') ;; 20000
+expect !!document.querySelector('.msg.live .msg-text')
+# 思考与正文是两格（核心的增量带 deltaKind）；mock 先吐 reasoning 再吐正文
+until !!document.querySelector('.msg.live .msg-text.reasoning') ;; 15000
+# 增量是**一截一截**到的：长度会长，而不是一次性画完
+eval window.__n = (document.querySelector('.msg.live')?.textContent || '').length
+until ((document.querySelector('.msg.live')?.textContent || '').length > window.__n) ;; 15000
+# 最终 `message.appended` 把它**整块**换掉：临时的没了、正式的那条在、且这一段只有一条
+until !document.querySelector('.msg.live') ;; 25000
+until /收到/.test([...document.querySelectorAll('.msg.from-model')].map(x => x.textContent).join('\n')) ;; 25000
+expect document.querySelectorAll('.msg.from-model.live').length === 0
+expect document.querySelectorAll('.msg.from-model').length === 1
+# 正式消息里没有「正在说…」那句临时文案（临时气泡真的被丢掉了，不是叠了两层）
+expect !/正在说/.test(document.querySelector('.msg.from-model')?.textContent || '')
+# 第二步：工具调用在流式路径上也要成立——`arguments` 是**分两片**到的，核心逐字拼接。
+# 拼坏了就没有工具卡（或者参数残缺），所以这里验的是「卡片按名字出来了、参数完整」。
+eval (async () => { const ack = await cadenza.core.command({ kind: 'session.send', sessionId: window.__sid, blocks: [{ kind: 'text', text: '请 ls 一下' }] }); return ack.accepted; })()
+until document.querySelectorAll('.msg.from-model').length >= 2 ;; 25000
+until !!document.querySelector('.toolcall[data-tool="ls"]') ;; 25000
+expect /"path"/.test(document.querySelector('.toolcall[data-tool="ls"]')?.textContent || '')
+# 收尾：删掉探针会话，别把垃圾留在隔离数据根里
+eval (async () => { const ack = await cadenza.core.command({ kind: 'session.delete', sessionId: window.__sid }); cadenza.current = null; return ack.accepted; })()
+logs

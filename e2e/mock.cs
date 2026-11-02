@@ -180,6 +180,14 @@ while (true)
         else
             message = Text($"## 收到\n\n你说的是：**{Trunc(content)}**。\n\n这是一个 *模拟* 回复，包含 `inline code`、列表：\n\n1. 第一项\n2. 第二项\n\n> 引用一句话。\n\n| 列 | 值 |\n|---|---|\n| a | 1 |\n| b | 2 |", "先想一想用户要什么。然后组织一个带格式的回答。");
 
+        // ⚠️ **流式**（核心 2026-11）：只有请求里真的带了 `"stream": true` 才走 SSE。
+        // 关着流式时这里**一个字节都不变**——e2e 的其它脚本靠这条判据证明「开关默认关」。
+        if (req["stream"] is JsonValue sv && sv.TryGetValue<bool>(out var streaming) && streaming)
+        {
+            await WriteSse(ctx, message, id, 800 + body.Length / 4, 40 + id * 7);
+            return;
+        }
+
         var resp = new JsonObject
         {
             ["id"] = $"mock-{id}",
@@ -210,6 +218,127 @@ static async Task Write(HttpListenerContext ctx, string s)
     ctx.Response.ContentLength64 = b.Length;
     await ctx.Response.OutputStream.WriteAsync(b);
     ctx.Response.Close();
+}
+
+// SSE（`text/event-stream`）：把同一条回复按协议切成增量帧发出去。
+//
+// ⚠️ 三件事必须与核心的读法对上（`OpenAiHttp.PostStreamAsync`）：
+//   · 每帧一行 `data: <json>` + 空行——它只认 `data:` 开头的行；
+//   · 结尾必须是 `data: [DONE]`（或者把连接关掉，但那会让「答完了」与「断了」混在一起）；
+//   · `stream_options.include_usage` 的用量只出现在**尾帧**（`choices` 是空数组）。
+// ⚠️ 每帧之前 `FlushAsync`：不 flush 的话整个响应在缓冲区里等到结束才到，
+// 而「流式」在核心那边会退化成一次性的（测试仍然全绿，但什么也没证明）。
+static async Task WriteSse(HttpListenerContext ctx, JsonObject message, int id, int promptTokens, int completionTokens)
+{
+    var res = ctx.Response;
+    res.ContentType = "text/event-stream";
+    res.Headers["Cache-Control"] = "no-store";
+    res.SendChunked = true;             // SSE 没有内容长度；与 ContentLength64 互斥
+    var output = res.OutputStream;
+
+    async Task Send(string json)
+    {
+        await output.WriteAsync(Encoding.UTF8.GetBytes("data: " + json + "\n\n"));
+        await output.FlushAsync();
+    }
+
+    JsonObject Chunk(JsonObject delta, string? finish) => new()
+    {
+        ["id"] = $"mock-{id}",
+        ["object"] = "chat.completion.chunk",
+        ["model"] = "mock",
+        ["choices"] = new JsonArray(new JsonObject
+        {
+            ["index"] = 0,
+            ["delta"] = delta,
+            ["finish_reason"] = finish,
+        }),
+    };
+
+    var reasoning = (string?)message["reasoning_content"];
+    var text = (string?)message["content"] ?? "";
+    var calls = message["tool_calls"] as JsonArray;
+
+    // 次序与整份响应里的字段次序一致：思考 → 正文 → 工具调用。
+    // ⚠️ 片间隔 150ms：核心的攒批窗口是 50ms，一片一帧会让「流式」看起来像一次性的。
+    if (!string.IsNullOrEmpty(reasoning))
+        foreach (var piece in Pieces(reasoning, 3))
+        {
+            await Send(Chunk(new JsonObject { ["reasoning_content"] = piece }, null).ToJsonString());
+            await Task.Delay(150);
+        }
+
+    if (text.Length > 0)
+        foreach (var piece in Pieces(text, 8))
+        {
+            await Send(Chunk(new JsonObject { ["content"] = piece }, null).ToJsonString());
+            await Task.Delay(150);
+        }
+
+    if (calls is { Count: > 0 })
+    {
+        // id / name 一次给全，**参数分两半**：核心把 `arguments` 逐字拼接，
+        // 拼接坏了就看不到工具卡（那正是这条分支要证的东西）。
+        var call = calls[0]!.AsObject();
+        var fn = call["function"]!.AsObject();
+        var args = (string?)fn["arguments"] ?? "{}";
+        var cut = args.Length / 2;
+        await Send(Chunk(new JsonObject
+        {
+            ["tool_calls"] = new JsonArray(new JsonObject
+            {
+                ["index"] = 0,
+                ["id"] = (string?)call["id"],
+                ["type"] = "function",
+                ["function"] = new JsonObject { ["name"] = (string?)fn["name"], ["arguments"] = args[..cut] },
+            }),
+        }, null).ToJsonString());
+        await Task.Delay(150);
+        await Send(Chunk(new JsonObject
+        {
+            ["tool_calls"] = new JsonArray(new JsonObject
+            {
+                ["index"] = 0,
+                ["function"] = new JsonObject { ["arguments"] = args[cut..] },
+            }),
+        }, null).ToJsonString());
+    }
+
+    await Send(Chunk(new JsonObject(), calls is { Count: > 0 } ? "tool_calls" : "stop").ToJsonString());
+
+    // 用量尾帧：`choices` 空数组，usage 只在这里（与 include_usage 的约定一致）。
+    await Send(new JsonObject
+    {
+        ["id"] = $"mock-{id}",
+        ["object"] = "chat.completion.chunk",
+        ["model"] = "mock",
+        ["choices"] = new JsonArray(),
+        ["usage"] = new JsonObject
+        {
+            ["prompt_tokens"] = promptTokens,
+            ["completion_tokens"] = completionTokens,
+            ["total_tokens"] = promptTokens + completionTokens,
+        },
+    }.ToJsonString());
+
+    await Send("[DONE]");
+    res.Close();
+}
+
+// 把一段文本切成 n 片。
+// ⚠️ 按 **rune** 而不是 char 切：C# 的 string 索引是 UTF-16 单元，切开一个 emoji 会得到
+// 两个坏代理项，而它会被原样写进 JSON（服务端解析成功、屏幕上是一个问号）。
+static IEnumerable<string> Pieces(string s, int n)
+{
+    var elems = new List<string>();
+    foreach (var rune in s.EnumerateRunes()) elems.Add(rune.ToString());
+    if (elems.Count == 0) yield break;
+    var per = Math.Max(1, (int)Math.Ceiling(elems.Count / (double)n));
+    for (var i = 0; i < elems.Count; i += per)
+    {
+        var take = Math.Min(per, elems.Count - i);
+        yield return string.Concat(elems.GetRange(i, take));
+    }
 }
 static string Trunc(string s) => s.Length > 40 ? s[..40] + "…" : s;
 

@@ -866,15 +866,27 @@ function onEvent(p, topic, seq) {
       // 由调音台自己决定要不要拉（它有 400ms 去抖，且只在有在跑或正看着页签时真拉）。
       mixer.refreshJobsSoon();
       break;
+    // ⚠️ **流式增量**（核心 2026-11）。只供显示：`blockIndex` + `deltaKind` 决定塞进哪一格，
+    // 之后任何一条最终消息 / 步起止 / 状态 / 出错都会把它整块丢掉（见 timeline.applyDelta）。
+    case "term.delta":
+      tl.apply(p);
+      break;
     // Status itself is folded by model.onGlobalEvent (runs right after this) and redrawn in onRows.
     case "session.step.begin":
+      // 新的一步 ⇒ 上一段临时正文作废（正常路径上 `message.appended` 已经收掉它；
+      // 这一条保证「残留的临时气泡不会跨步活着」）。
+      tl.clearLive();
       S.retryNote = null;
       break;
     case "session.step.end":
+      // 这一步结束了：拒答 / 空块那两条**不会发模型消息**，临时气泡只能在这里收。
+      tl.clearLive();
       S.retryNote = null;
       if (p.refused) tl.note("error", ["模型拒答了这一步", p.stopReason ? h("code", p.stopReason) : null]);
       break;
     case "session.state":
+      // 落回非 Running ⇒ 这一步不再吐增量了；留着半个气泡就是对没发生的事撒谎。
+      if (p.status !== "Running") tl.clearLive();
       if (S.snap?.state) { S.snap.state.status = p.status; S.snap.state.turn = p.turn; }
       if (p.status !== "Running") S.retryNote = null;
       break;
@@ -908,6 +920,9 @@ function onEvent(p, topic, seq) {
       renderHead(); mixer.refresh();
       break;
     case "error": {
+      // 失败 ⇒ 这一段话**没有成为事实**（拒答 / 抛异常的步不落模型消息），
+      // 临时气泡留着就是对没发生的事撒谎。
+      tl.clearLive();
       if (S.retryNote?.isConnected) S.retryNote.classList.add("spent");
       S.retryNote = null;
       const content = [h("b", "不和谐音 · "), p.message];

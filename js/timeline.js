@@ -43,6 +43,8 @@ export class Timeline {
     this.lastSeq = null;
     this.savedScrollTop = null;
     this.savedAtEnd = true;
+    // 流式增量的临时气泡（`term.delta`，核心 2026-11）。**它不是事实**，见 applyDelta。
+    this.live = null;
     this.list = h("ol.tl-list", { role: "list" });
     this.moreButton = h("button.btn.btn-ghost.btn-sm", { type: "button", onclick: () => this.older() }, "加载更早的消息");
     this.top = h("li.tl-top", this.moreButton);
@@ -63,6 +65,9 @@ export class Timeline {
   /** 从舞台摘下但**不销毁**：缓存切回时直接挂回，省掉重新拉历史与重建 DOM。 */
   detach() {
     if (!this.root) return;
+    // 增量只在「正看着」时有意义；缓存着的那一份不该带着一段半截正文（切回来时
+    // 权威事实是 `message.appended` / 历史，而不是这半个气泡）。
+    this.clearLive();
     this.savedAtEnd = this.atEnd();
     this.savedScrollTop = this.root.scrollTop;
     this.list.remove();
@@ -70,12 +75,16 @@ export class Timeline {
   }
 
   dispose() {
+    this.clearLive();
     this.list.remove();
     this.root = null;
   }
 
   async first() {
     this.loading = true;
+    // 重新拉历史会把时间线整个换掉 ⇒ 临时气泡的引用也必须清（否则后续增量会往一个
+    // **已经不在树上**的节点里写，页面上看起来就是「流式没了」，而它其实还在往内存里堆）。
+    this.clearLive();
     try {
       const page = await this.core.get(`/sessions/${encodeURIComponent(this.id)}/history?limit=20`);
       const frag = document.createDocumentFragment();
@@ -142,6 +151,9 @@ export class Timeline {
   }
 
   _message({ from, blocks, at, key }, into = this.list) {
+    // ⚠️ 最终消息到了 ⇒ 临时气泡作废（同一段话的两种形态，留着就是屏幕上两遍）。
+    // 只对**模型**消息、且只对实时那条路（`into === this.list`）生效：历史分页里没有流式这回事。
+    if (from !== "user" && into === this.list) this.clearLive();
     if (key) { if (this.seen.has(key)) return; this.seen.add(key); }
     const isUser = from === "user";
     // 先摘掉浮动上下文：核心常常让它单独成一条消息，摘完就没内容了 —— 那种整条都不画，
@@ -243,11 +255,59 @@ export class Timeline {
     return li;
   }
 
+  // ---------- 流式增量（`term.delta`，核心 2026-11）----------
+  //
+  // ⚠️ **临时气泡不是事实**：核心在步末仍会发 `message.appended`，那一条才是权威；这里画的
+  // 只是「模型正在说」的样子，见到最终消息就**整块丢掉**。所以少画一段、多画一段都不影响
+  // 记录——这些帧核心也**不保留、不补发**（`Publish(retained:false)`），断线重连拿不到它们。
+  // ⚠️ 因此它**不进 `seen`**（去重键是 historyId，临时气泡没有身份）、也**不碰 `count`**
+  // （那一个是「有没有内容」的判据，临时气泡不该把它永久抬高）。
+  applyDelta(p) {
+    // 没挂在舞台上（缓存着的会话）：不画。切回来时以最终消息 / 历史为准。
+    if (!this.root) return;
+
+    if (!this.live || this.live.turn !== p.turn) {
+      this.clearLive();
+      this.list.querySelector(".tl-empty")?.remove();
+      const body = h("div.msg-body");
+      const li = h("li.msg.from-model.live", { dataset: { live: "1" } },
+        h("div.msg-gutter", { "aria-hidden": "true" }, h("span.msg-clef", "𝄢")),
+        h("div.msg-main",
+          h("div.msg-meta", h("span.msg-who", "Lilara"), h("span.dim.live-now", "正在说…")),
+          body));
+      const stick = this.atEnd();
+      this.list.append(li);
+      this.live = { turn: p.turn, el: li, body, parts: new Map(), stick };
+    }
+
+    const kind = p.deltaKind === "reasoning" ? "reasoning" : "text";
+    const key = `${p.blockIndex ?? 0}:${kind}`;
+    let part = this.live.parts.get(key);
+    if (!part) {
+      // 一块一个 `<div>`：思考与正文分开（与最终气泡里「先想、再说」的次序一致）。
+      part = h(`div.msg-text${kind === "reasoning" ? ".reasoning" : ""}`);
+      this.live.body.append(part);
+      this.live.parts.set(key, part);
+    }
+    part.textContent += p.text || "";
+    if (this.live.stick && this.atEnd()) this.scrollEnd(true);
+  }
+
+  /** 这一段「正在说」到此为止（最终消息 / 步起止 / 出错 / 切走都会叫它）。 */
+  clearLive() {
+    if (!this.live) return;
+    this.live.el.remove();
+    this.live = null;
+  }
+
   // ---------- live events ----------
   apply(p) {
     switch (p.kind) {
       case "message.appended":
         this._message({ from: p.from, blocks: p.blocks, at: p.at, key: p.historyId && "m:" + p.historyId });
+        break;
+      case "term.delta":
+        this.applyDelta(p);
         break;
       case "tool.result.appended":
         this._result({ id: p.id, callId: p.callId, blocks: p.blocks, at: p.at });

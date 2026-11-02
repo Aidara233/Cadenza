@@ -181,6 +181,17 @@
 .msg-body > * + * { margin-top: 8px; }
 .from-tool { padding: 2px 0; }
 
+/* ---- 流式临时气泡（`term.delta`，核心 2026-11）----
+   ⚠️ 它是**临时**的：最终消息一到就整块换掉（见 timeline.applyDelta）。所以别做得跟正式
+   气泡一模一样——「还没定稿」得看得出来，替换时那一下才不会被读成「内容凭空变了」。
+   ⚠️ 正文用 `pre-wrap`：增量是**逐字**到达的，折叠空白会把模型的分行吃掉。 */
+.msg.live .msg-who { color: var(--paper-3); }
+.msg.live .msg-text { white-space: pre-wrap; word-break: break-word; }
+.msg.live .msg-text.reasoning { color: #d8c2f2; font-size: 12.5px; }
+.live-now { font: 11px var(--mono); }
+.live-now::after { content: "▍"; margin-left: 2px; color: var(--brass); animation: live-caret 1s steps(2) infinite; }
+@keyframes live-caret { 50% { opacity: 0; } }
+
 /* ---- notes (system notation) ---- */
 .note { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 6px 0; font-size: 12.5px; color: var(--paper-3); }
 .note.fresh { animation: msg-in .45s var(--ease); }
