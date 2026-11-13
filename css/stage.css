@@ -192,6 +192,12 @@
 .live-now::after { content: "▍"; margin-left: 2px; color: var(--brass); animation: live-caret 1s steps(2) infinite; }
 @keyframes live-caret { 50% { opacity: 0; } }
 
+/* 「执行中」那一行（`tool.call.started`，核心 2026-11-05）：与流式气泡同一条纪律——
+   **临时的**，步末的模型消息一到就整块换掉。所以别画得像正式消息：虚线边 + 半透明的
+   话筒，看得出「还没定稿」。（正文卡里的 `.tc-pending` 已经自带转圈与「执行中…」。） */
+.msg.live.tools .msg-who { color: var(--paper-3); }
+.toolcall.running { border-style: dashed; background: rgba(14, 12, 10, .35); }
+
 /* ---- notes (system notation) ---- */
 .note { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 6px 0; font-size: 12.5px; color: var(--paper-3); }
 .note.fresh { animation: msg-in .45s var(--ease); }
@@ -228,10 +234,24 @@
 .md .tick.on { background: var(--verdigris); border-color: var(--verdigris); }
 .md code { background: rgba(255, 240, 210, .06); padding: .1em .4em; border-radius: 4px; color: var(--brass-2); }
 .md blockquote { margin: .6em 0; padding: .1em 0 .1em 14px; border-left: 2px solid var(--brass); color: var(--paper-2); font-family: var(--serif); font-style: italic; }
-.md-table { overflow-x: auto; margin: .6em 0; }
-.md table { border-collapse: collapse; font-size: 13px; }
-.md th, .md td { border-bottom: 1px solid var(--line-soft); padding: 6px 12px; text-align: left; }
-.md th { color: var(--paper-3); font-weight: 600; font-size: 12px; border-bottom-color: var(--line); }
+/* ---- markdown 表格 ----
+   ⚠️ 卡片那层**不透明底**是必须的：`.score-scroll` 背后是 64px 一格的五线谱，表格若没有底色，
+   谱线就从行间穿过去，跟表格自己的横线混成一套「线」——哪条属于表格、哪条属于纸，谁也读不清。
+   底一盖，谱线在卡片里断掉，剩下的线就都归表格自己。
+   行/列分隔用斑马纹 + 竖细线（而不是横竖都画满）：行一多，横线会跟谱线一起变成一片噪点。 */
+.md-table { margin: .8em 0; width: fit-content; max-width: 100%; max-height: min(62vh, 560px); overflow: auto; background: var(--ink-0); border: 1px solid var(--line-soft); border-radius: 10px; }
+/* 宽度交给浏览器算（`auto`，不是 100%）：小表收成一窄张、大表填满列宽再横向滚。
+   强行 100% 会把「列 | 值」这种两列小表拉成一整行，数字被推到八百像素外的右端。 */
+.md table { width: auto; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+/* `keep-all`：中文不逐字断行（「通过」不会竖着排成「通」「过」两行）；真放不下时
+   `overflow-wrap` 再兜底。列一窄就逐字换行，是「大表格显得挤」的另一半原因。 */
+.md th, .md td { padding: 8px 14px; text-align: left; vertical-align: top; line-height: 1.55; word-break: keep-all; overflow-wrap: break-word; }
+.md th + th, .md td + td { border-left: 1px solid var(--line-soft); }
+.md thead th { position: sticky; top: 0; z-index: 1; border-bottom: 1px solid var(--line); background: var(--ink-2); color: var(--paper-3); font: 600 12px var(--sans); letter-spacing: .02em; white-space: nowrap; }
+.md tbody tr:nth-child(even) { background: rgba(255, 240, 210, .018); }
+/* 数字列：靠右 + 等宽数字（`md.js` 判的整列都是数才加 `.num`）。
+   这样「行一多就比不出大小」的问题没了，位数也对得齐。 */
+.md .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 figure.code { margin: .6em 0; border: 1px solid var(--line-soft); border-radius: 10px; overflow: hidden; background: var(--ink-0); }
 figure.code figcaption { display: flex; justify-content: space-between; align-items: center; padding: 4px 6px 4px 12px; font: 11px var(--mono); color: var(--paper-4); border-bottom: 1px solid var(--line-soft); background: rgba(255, 240, 210, .02); }
 figure.code pre { margin: 0; padding: 12px 14px; overflow: auto; max-height: 440px; font: 12.5px/1.6 var(--mono); }
@@ -557,19 +577,97 @@ pre.out { margin: 0; padding: 10px 12px; max-height: 360px; overflow: auto; back
 .tc-joblink { margin-top: 8px; }
 .tc-job code { font-size: 11px; color: var(--paper-2); }
 
-/* ---- responsive ---- */
+/* ---- responsive ----
+   三档：1280 三栏收窄 → 1080 调音台收成抽屉 → 760 换成**屏栈**。
+   ⚠️ 760 这一档不是「把三栏压成一栏」：桌面上并排的东西在手机上按**屏**给——
+   会话屏之外，节目单 / 调音台 / 概览各是一整个屏（`[data-screen]` 切），头部三颗入口进，
+   顶栏那颗 `←` 回。这样每屏只放一件事，字不会被挤成竖排，按钮也不用缩到指尖点不中。
+   抽屉（`drawer-mix`）只留给 761–1080：那档没有屏栈，也没地方再放第二个栏。 */
+.scrim { display: none; position: absolute; inset: 0; z-index: 25; background: rgba(8, 6, 4, .5); backdrop-filter: blur(2px); }
+.sh-menu, .sh-mixer, .sh-about { display: none; }
+.about { display: none; }
+
 @media (max-width: 1280px) { .stage { grid-template-columns: 250px minmax(0, 1fr) 300px; } }
 @media (max-width: 1080px) {
-  .stage { grid-template-columns: 230px minmax(0, 1fr); }
-  .mixer { display: none; }
+  .stage { position: relative; grid-template-columns: 230px minmax(0, 1fr); }
+  .mixer {
+    position: absolute; inset: 0 0 0 auto; width: min(92vw, 380px); z-index: 31;
+    display: block; transform: translateX(102%); transition: transform .26s var(--ease);
+    background: var(--ink-1); border-left: 1px solid var(--line); box-shadow: -18px 0 50px -22px rgba(0, 0, 0, .8);
+  }
+  .stage.drawer-mix .mixer { transform: none; }
+  .stage.drawer-mix > .scrim { display: block; }
+  .sh-mixer { display: inline-grid; }
 }
 @media (max-width: 760px) {
   .stage { grid-template-columns: 1fr; }
-  .programme { display: none; }
-  .stage:not(.has-session) .programme { display: flex; }
+  /* 三个二级屏：整屏盖上来（不是抽屉，没有遮罩，也不滑） */
+  .programme, .mixer, .about {
+    position: absolute; inset: 0; z-index: 31; width: auto; transform: none;
+    background: var(--ink-1); border: 0; box-shadow: none; transition: none;
+  }
+  .programme, .mixer { display: none; }
+  .stage[data-screen="list"] .programme { display: flex; flex-direction: column; }
+  .stage[data-screen="mixer"] .mixer { display: block; }
+  .stage[data-screen="about"] .about { display: flex; flex-direction: column; overflow-y: auto; }
+  /* 门厅：没有会话时节目单就是页面本身 */
+  .stage:not(.has-session) .programme { display: flex; position: static; }
   .stage:not(.has-session) .score { display: none; }
-  .score-h, .composer { padding-left: 14px; padding-right: 14px; }
-  .tl-list { padding: 0 14px; }
+  /* 屏栈不是抽屉：这一档不要遮罩 */
+  .stage.drawer-mix > .scrim { display: none; }
+
+  /* —— 会话屏的头部：标题 + 相位 + ☰ 𝄢 ⋯ —— */
+  .score-h { padding: 10px 12px 6px; gap: 8px; align-items: center; flex-wrap: nowrap; }
+  .sh-main { min-width: 0; }
+  .sh-eyebrow { display: none; }
+  .sh-title { font-size: 19px; margin: 2px 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sh-meta { flex-wrap: nowrap; gap: 4px; overflow: hidden; }
+  .sh-meta .chip { display: none; }
+  /* 有事的格子仍露头：在跑的后台任务、目标。其余（模型 / 回合 / 项目 / 子会话）在概览屏。 */
+  .sh-meta .chip.sh-jobs.running, .sh-meta .chip.goal { display: inline-flex; }
+  .sh-actions { gap: 2px; flex-wrap: nowrap; }
+  .sh-actions .btn { display: none; }
+  .sh-menu, .sh-about { display: inline-grid; }
+  /* 三颗入口用的是音乐记号（☰ 𝄢 ⋯）：`--serif` 那一族才有这些字形，别让 sans 去兜底 */
+  .sh-menu, .sh-mixer, .sh-about { font-family: var(--serif); font-size: 16px; }
+  .sh-more { display: none; }
+  .sh-kidpanel { display: none; }
+
+  /* —— 概览屏 —— */
+  .about { padding: 12px 12px 20px; gap: 10px; }
+  .about-h { display: flex; align-items: flex-start; gap: 10px; }
+  .about-h h2 { font-size: 20px; font-style: italic; margin-top: 2px; }
+  /* 概览屏的相位字：**不复用** `.sh-status`（那是头部那一格，e2e 与 7-sync 都在按它判），
+     但复用它的 `.st-*` 配色由下面这几行补上——同一个相位在哪儿都是同一个颜色。 */
+  .ab-phase { display: inline-flex; align-items: center; gap: 6px; font: italic 12.5px/1 var(--serif); color: var(--paper-3); }
+  .ab-phase .sh-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--paper-4); }
+  .ab-phase.st-gen { color: var(--verdigris); }
+  .ab-phase.st-gen .sh-dot { background: var(--verdigris); box-shadow: 0 0 0 3px var(--verdigris-dim); }
+  .ab-phase.st-tool { color: var(--sky); }
+  .ab-phase.st-tool .sh-dot { background: var(--sky); box-shadow: 0 0 0 3px var(--sky-dim); }
+  .ab-phase.st-wait { color: var(--brass-2); }
+  .ab-phase.st-wait .sh-dot { background: var(--brass); box-shadow: 0 0 10px var(--brass); }
+  .about-card .kv-row { flex-direction: column; align-items: flex-start; gap: 1px; }
+  .about-card .kv-v { text-align: left; max-width: 100%; overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+  .about-acts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .about-acts .btn { width: 100%; }
+
+  /* —— 其余（列表 / 输入 / 消息流）—— */
+  .score-h, .composer { padding-left: 12px; padding-right: 12px; }
+  .tl-list { padding: 0 12px; }
+  .perf, .cues { width: calc(100% - 24px); }
+  .cues:not(:empty) { max-height: 46dvh; }
+  .composer { padding: 8px 12px 10px; }
+  .composer-box { border-radius: 14px; padding: 8px 8px 6px 12px; }
+  .composer-inp { max-height: 34dvh; font-size: 16px; }
+  .prog-row { min-height: 42px; }
+  .mix-tab { height: 34px; }
+  .seg-b { height: 32px; }
+  .menu-item { padding: 11px 12px; }
+  .msg { grid-template-columns: 26px minmax(0, 1fr); gap: 8px; padding: 10px 0; }
+  .msg-clef { width: 24px; height: 24px; font-size: 14px; }
+  .msg-meta time { display: none; }
+  .toolcall > summary { flex-wrap: wrap; gap: 6px; padding: 8px 10px; }
 }
 
 /* ---- 图片块（核心的 `GET /store/{sha256}`，2026-10-29）---- */

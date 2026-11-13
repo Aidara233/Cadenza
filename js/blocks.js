@@ -93,7 +93,10 @@ export function toolUseBlock(b, opts = {}) {
   } else {
     body.append(h("div.tc-label", "参数（原文）"), jsonPre(b.arguments));
   }
-  const slot = h("div.tc-result", h("div.tc-pending", h("span.tc-spin", { "aria-hidden": "true" }), "等结果…"));
+  // ⚠️ 文案由调用方给：同一张卡在两种时候出现——「已经落盘、等结果」（等结果…）与
+  // 「正在跑、还没有记录」（执行中…，见 timeline.startToolCall）。用同一句话会把「还没落盘」
+  // 说成「已落盘」，而这两件事对用户是两件事（前者可以去翻历史，后者翻了也没有）。
+  const slot = h("div.tc-result", h("div.tc-pending", h("span.tc-spin", { "aria-hidden": "true" }), opts.pendingText || "等结果…"));
   // ⚠️ `data-tool` 必须带上：E2E 与样式都按工具名选卡片，少一个应用它的人就得改选择器。
   const childId = b.name === "subagent_report" && a && typeof a.child === "string" ? a.child : null;
   const card = h("details.toolcall", { dataset: { callId: b.callId, tool: b.name, name: b.name } },

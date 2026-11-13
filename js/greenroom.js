@@ -31,9 +31,10 @@ function providers(root) {
   const list = h("div.prov-grid");
   for (const p of app.providers) list.append(provCard(p));
   list.append(h("button.prov-card.prov-new", { type: "button", onclick: () => provForm(null) }, h("span.glyph", "+"), h("b", "加一位乐手"), h("small.dim", "新提供商")));
-  root.append(
-    !app.providers.length ? h("div.gr-hint", "核心还没有提供商——没有它就建不了会话。先加一个。") : null,
-    list);
+  // ⚠️ 别写成 `root.append(x ? el : null)`：`Element.append()` 会把 `null` **字符串化**，
+  // 页面上就多出一个「null」（窄屏里它会挤在卡片上方，特别显眼）。这里分开写。
+  if (!app.providers.length) root.append(h("div.gr-hint", "核心还没有提供商——没有它就建不了会话。先加一个。"));
+  root.append(list);
 }
 
 function provCard(p) {

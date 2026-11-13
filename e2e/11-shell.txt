@@ -53,11 +53,22 @@ shot 42-shell-ran
 until !window.__row(window.__B).classList.contains('st-gen') ;; 4000
 eval window.__say('长命令')
 until window.__row(window.__B).classList.contains('st-gen') ;; 12000
+;; 这条命令要跑 4 秒 ⇒ **它正在跑的时候时间线上得有东西**：核心在调用一开始就发
+;; `tool.call.started`（2026-11-05），头把它画成一张临时的「执行中」卡（虚线边、没有时间）。
+;; ⚠️ 没有这一条，一次跑五分钟的 `shell` 期间页面上一个字都没有。
+until !!document.querySelector('.toolcall.running') ;; 12000
+expect /执行中/.test(document.querySelector('.toolcall.running')?.textContent || '')
+expect document.querySelector('.toolcall.running').dataset.tool === 'shell'
 wait 1200
 eval document.querySelector('.composer-stop').click()
 until !!document.querySelector('.note-interrupt') ;; 8000
+;; 打断之后那张「执行中」不能继续挂着（那个进程已经不在了），而且**不能**变成两张卡
+expect !document.querySelector('.toolcall.running')
 wait 5000
 expect !window.__row(window.__B).classList.contains('st-gen')
+;; 也不能冒出一张「调用不在视野内」的孤儿：被打断那条调用的结果若先到过，它要么随模型消息
+;; 落到正经卡上，要么根本没有（这一支不写记录）——两种都不该凭空多一条。
+expect document.querySelectorAll('.msg.from-tool').length === 0
 shot 43-shell-interrupted
 
 ;; Put the session back so later scripts (if run after this one) start from the default tier.

@@ -14,9 +14,13 @@ eval (() => { const t = document.querySelector('.composer-inp'); t.value = '请 
 until !!document.querySelector('.cue.cue-q') ;; 10000
 expect document.querySelectorAll('.cue-q .cue-item').length === 3
 expect document.querySelectorAll('.cue-q .opt').length === 3
+# 标签题：有询问在等时 `(N)` 顶到最前——窗口最小化 / 切到别的标签，这一行是唯一还看得见的地方
+expect document.title.startsWith('𝄐1 等你')
 shot 08-question
 eval (() => { const c = document.querySelector('.cue-q'); c.querySelectorAll('.opt input')[1].click(); const t = c.querySelector('.cue-text'); t.value = 'Cadenza'; t.dispatchEvent(new Event('input')); const f = c.querySelectorAll('.cue-form input'); f[1].value = '周五'; f[1].dispatchEvent(new Event('input')); c.querySelector('.btn-primary').click(); return 1; })()
 until !document.querySelector('.cue') ;; 6000
+# 答完 ⇒ 前缀摘掉（不留在标签题里假装还有事）
+expect !/等你/.test(document.title)
 until [...document.querySelectorAll('.tc-name')].some(e => e.textContent === 'ask') && document.querySelectorAll('.msg.from-model').length >= 5 ;; 10000
 eval (async () => { const r = await cadenza.core.get('/sessions/' + cadenza.current + '/history'); const t = r.rendered.filter(x => x.kind === 'toolResult').pop(); return t.blocks.map(b => b.text).join('|'); })()
 logs

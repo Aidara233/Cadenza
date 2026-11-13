@@ -77,3 +77,20 @@ until document.querySelectorAll('.md-table tbody tr').length >= 2 ;; 10000
 expect document.querySelectorAll('.blk-err').length === 0
 expect !document.querySelector('.tl-err')
 shot 28-edge-table
+
+# 大表格：行裁/补到表头宽度（`<td>` 不齐会把网格撑歪）、整列数字靠右等宽、表头吸顶、
+# 卡片有不透明底（`.score-scroll` 背后的五线谱不再从表格中间穿过去）
+eval (() => { const t = document.querySelector('.composer-inp'); t.value = '给我一张大表'; t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; })()
+# 认表靠**列数**（默认回复里也有一张 2 列的小表，`.md-table` 的个数不是判据）
+eval window.__big = () => [...document.querySelectorAll('.md-table')].find((w) => w.querySelectorAll('thead th').length === 8); 1
+until !!window.__big() ;; 15000
+eval (() => { const w = window.__big(); return JSON.stringify({ rows: w.querySelectorAll('tbody tr').length, cols: w.querySelectorAll('thead th').length, cells: w.querySelectorAll('tbody tr:first-child td').length }); })()
+expect (() => { const w = window.__big(); return w.querySelectorAll('tbody tr').length >= 20 && w.querySelectorAll('tbody tr:first-child td').length === 8; })()
+# 数字列（序号 / 行数 / 覆盖率 / 耗时 / 大小）判成 `.num`，文本列（组件 / 状态）不判
+expect (() => { const w = window.__big(); return w.querySelectorAll('thead th.num').length === 5 && !w.querySelectorAll('thead th')[1].classList.contains('num'); })()
+# 卡片有不透明底（谱线在卡片里断掉）+ 表头吸顶（竖向滚动时还在）
+expect (() => { const w = window.__big(); return getComputedStyle(w).backgroundColor === 'rgb(14, 12, 10)' && getComputedStyle(w.querySelector('thead th')).position === 'sticky'; })()
+# 截图前把它滚到眼前（表在消息流靠下的位置，不滚只拍到上一张表）
+eval window.__big().scrollIntoView({ block: 'center' })
+wait 400
+shot 29-big-table

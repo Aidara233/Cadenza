@@ -34,6 +34,11 @@ export class Timeline {
     this.floating = new Set();
     this.cards = new Map();        // callId -> toolcall <details>
     this.orphans = new Map();      // callId -> result waiting for its call (older page)
+    // 实时路径上「结果先到、调用还没落盘」（核心 2026-11-05 起：跑完一条报一条，而模型消息
+    // 在**步末**才落盘）⇒ 这两张表必须分开：上面那张等的是**更早那页**（它永远不会来），
+    // 这张等的是**下一步末**（马上就来）。合成一张就没法在步末分辨「该画成孤儿了吗」。
+    this.parked = new Map();       // callId -> result（等它那条模型消息）
+    this.running = null;           // 「执行中」那一行（tool.call.started）：{ turn, el, body, cards, stick }
     this.cursor = null;
     this.hasMore = false;
     this.loading = false;
@@ -68,6 +73,9 @@ export class Timeline {
     // 增量只在「正看着」时有意义；缓存着的那一份不该带着一段半截正文（切回来时
     // 权威事实是 `message.appended` / 历史，而不是这半个气泡）。
     this.clearLive();
+    // 同理：「执行中」那行也是**眼下**的形态。缓存里的会话不该钉着一张「执行中」的卡
+    // ——切回来时那张卡要么早就配上了结果（模型消息里），要么那条调用压根没落盘。
+    this.clearRunning();
     this.savedAtEnd = this.atEnd();
     this.savedScrollTop = this.root.scrollTop;
     this.list.remove();
@@ -76,6 +84,7 @@ export class Timeline {
 
   dispose() {
     this.clearLive();
+    this.clearRunning();
     this.list.remove();
     this.root = null;
   }
@@ -85,6 +94,7 @@ export class Timeline {
     // 重新拉历史会把时间线整个换掉 ⇒ 临时气泡的引用也必须清（否则后续增量会往一个
     // **已经不在树上**的节点里写，页面上看起来就是「流式没了」，而它其实还在往内存里堆）。
     this.clearLive();
+    this.clearRunning();
     try {
       const page = await this.core.get(`/sessions/${encodeURIComponent(this.id)}/history?limit=20`);
       const frag = document.createDocumentFragment();
@@ -153,7 +163,7 @@ export class Timeline {
   _message({ from, blocks, at, key }, into = this.list) {
     // ⚠️ 最终消息到了 ⇒ 临时气泡作废（同一段话的两种形态，留着就是屏幕上两遍）。
     // 只对**模型**消息、且只对实时那条路（`into === this.list`）生效：历史分页里没有流式这回事。
-    if (from !== "user" && into === this.list) this.clearLive();
+    if (from !== "user" && into === this.list) { this.clearLive(); this.clearRunning(); }
     if (key) { if (this.seen.has(key)) return; this.seen.add(key); }
     const isUser = from === "user";
     // 先摘掉浮动上下文：核心常常让它单独成一条消息，摘完就没内容了 —— 那种整条都不画，
@@ -164,6 +174,7 @@ export class Timeline {
       if (b.kind === "toolUse" && isFloating(b.callId, b.name)) {
         this.floating.add(b.callId);
         this.orphans.delete(b.callId);   // 结果若先到并停在孤儿区，一起丢掉
+        this.parked.delete(b.callId);
         hid = true;
         continue;
       }
@@ -176,8 +187,12 @@ export class Timeline {
         if (b.kind === "toolUse") {
           const card = toolUseBlock(b, { openSession: this.openSession });
           this.cards.set(b.callId, card);
-          const orphan = this.orphans.get(b.callId);
-          if (orphan) { attachResult(card, orphan, this.resultOpts); this.orphans.delete(b.callId); }
+          // 结果可能**已经**到了：实时那条路（`parked`，结果早于模型消息）或更早那页（`orphans`）。
+          // ⚠️ 两处都要看——只看一处，另一处的输出就永远贴不上来（卡片停在「等结果…」）。
+          const early = this.parked.get(b.callId) || this.orphans.get(b.callId);
+          this.parked.delete(b.callId);
+          this.orphans.delete(b.callId);
+          if (early) attachResult(card, early, this.resultOpts);
           body.append(card);
         } else body.append(renderBlock(b));
       } catch (e) {
@@ -210,11 +225,32 @@ export class Timeline {
     if (this.floating.has(r.callId) || isFloating(r.callId)) return;
     const card = this.cards.get(r.callId);
     if (card) { attachResult(card, r, this.resultOpts); return; }
-    // Result whose call is on an older page (cannot happen with group paging, but be honest) — park it.
+    // Result whose call is on an older page — park it (that page is never coming back through
+    // paging, but the call may still show up in a re-fetch; keeping it is honest, drawing it is not).
     if (into !== this.list) { this.orphans.set(r.callId, r); return; }
-    const stray = toolUseBlock({ callId: r.callId, name: "（调用不在视野内）", arguments: "{}" });
-    attachResult(stray, r, this.resultOpts);
-    this._put(h("li.msg.from-tool", h("div.msg-gutter"), h("div.msg-main", stray)), into);
+    // ⚠️ **运行中，结果常常比它那条模型消息先到**（核心 2026-11-05 起：跑完一条报一条，
+    // 而 `tool_use` 所在的模型消息在**步末**才落盘）。这时绝不能就地画一张「调用不在视野内」：
+    // 它会被追加在**上一条消息**后面，看起来就像「这次调用的结果属于上一条消息」——
+    // 而真正那张卡还在新消息里转着「等结果…」。
+    // ⇒ 停在 `parked`，先贴到「执行中」的临时卡上（让人先看见输出），等模型消息到了再贴到正经卡上。
+    const running = this.running?.cards.get(r.callId);
+    if (running) attachResult(running, r, this.resultOpts);
+    this.parked.set(r.callId, r);
+  }
+
+  /** 步收尾：临时「执行中」那行作废；停在 `parked` 里、到这一步结束仍没等到调用的结果，
+   *  就地画出来——那说明那条 `tool_use` 压根没落盘（跑到一半被打断就是这条），
+   *  「调用不在视野内」正是事实。⚠️ 只在步边界叫它：早叫会把还在路上的模型消息判成孤儿。 */
+  settleRunning() {
+    this.clearRunning();
+    if (!this.parked.size) return;
+    const rest = [...this.parked];
+    this.parked.clear();
+    for (const [callId, r] of rest) {
+      const stray = toolUseBlock({ callId, name: "（调用不在视野内）", arguments: "{}" });
+      attachResult(stray, r, this.resultOpts);
+      this._put(h("li.msg.from-tool", h("div.msg-gutter"), h("div.msg-main", stray)), this.list);
+    }
   }
 
   _release(it, into = this.list) {
@@ -293,6 +329,48 @@ export class Timeline {
     if (this.live.stick && this.atEnd()) this.scrollEnd(true);
   }
 
+  // ---------- 「执行中」那一行（`tool.call.started`，核心 2026-11-05）----------
+  //
+  // ⚠️ 与 `live`（`term.delta`）**同一套纪律**：核心 `Publish(retained:false)`、重连不补发，
+  // 而且它**没有对应的记录**（记录里那条 `tool_use` 在步末才随模型消息落盘）⇒ 只供显示：
+  // 不进 `seen`、不碰 `count`，**步末的模型消息一到就整块丢掉**（那时才有事实）。
+  // 它存在的唯一理由：一次跑五分钟的 `shell` 期间，时间线上不能一个字都没有。
+  startToolCall(p) {
+    // 没挂在舞台上（缓存着的会话）：不画。切回来时以模型消息 / 历史为准（同 applyDelta）。
+    if (!this.root) return;
+    if (isFloating(p.callId, p.name)) return;
+    if (!this.running || this.running.turn !== p.turn) {
+      this.clearRunning();
+      this.list.querySelector(".tl-empty")?.remove();
+      const body = h("div.msg-body");
+      const li = h("li.msg.from-model.live.tools",
+        h("div.msg-gutter", { "aria-hidden": "true" }, h("span.msg-clef", "𝄢")),
+        h("div.msg-main",
+          h("div.msg-meta", h("span.msg-who", "Lilara"), h("span.dim.live-now", "调用中…")),
+          body));
+      this.list.append(li);
+      this.running = { turn: p.turn, el: li, body, cards: new Map(), stick: this.atEnd() };
+    }
+    const card = toolUseBlock({ callId: p.callId, name: p.name, arguments: p.arguments },
+      { pendingText: "执行中…" });
+    card.classList.add("running");
+    this.running.body.append(card);
+    this.running.cards.set(p.callId, card);
+    // 结果若比调用先到（不该发生，但别把它藏起来）：先贴上，**同时留在 `parked`**——
+    // 正经那张卡还得再贴一次，所以这里不能把它从表里摘掉。
+    const early = this.parked.get(p.callId);
+    if (early) attachResult(card, early, this.resultOpts);
+    if (this.running.stick && this.atEnd()) this.scrollEnd(true);
+  }
+
+  /** 「执行中」那一行到此为止（模型消息 / 步起止 / 切走都会叫它）。 */
+  clearRunning() {
+    if (!this.running) return;
+    this.running.el.remove();
+    this.running = null;
+    this._emptyState();
+  }
+
   /** 这一段「正在说」到此为止（最终消息 / 步起止 / 出错 / 切走都会叫它）。 */
   clearLive() {
     if (!this.live) return;
@@ -308,6 +386,10 @@ export class Timeline {
         break;
       case "term.delta":
         this.applyDelta(p);
+        break;
+      // 「一条调用开始跑了」（核心 2026-11-05）：只供显示的临时卡，见 startToolCall。
+      case "tool.call.started":
+        this.startToolCall(p);
         break;
       case "tool.result.appended":
         this._result({ id: p.id, callId: p.callId, blocks: p.blocks, at: p.at });

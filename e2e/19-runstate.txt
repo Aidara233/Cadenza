@@ -1,0 +1,105 @@
+# 顶栏「运行状态」（js/runstate.js）：当前会话 / 出错 / 演奏中 三格，全部从同一行读。
+#
+# ⚠️ 判据是**顶栏**（`.rs-*`）而不是舞台头部（`.sh-status` / `.chip.sh-jobs`）：
+#    那两格是「打开这一场时」的读数；顶栏这一份要的是「切到别的视图也还在」的那一份，
+#    所以除了字要与头部一致，还要证明**换了视图它还在**。
+#
+# ⚠️ 标签题与「✕ N 出错 / ♩ N 演奏中」报的是**整个核心的数**，而这个数据根是整个 e2e 共用的
+#    （前面的脚本会留下会话、出错、甚至一场停在 Running 的）。⇒ 断言一律**相对**：
+#    先量一份基线（`__t0` / `__run0` / `__others0` …），之后只验「这一条自己弄出来的 +1 / -1」。
+#    绝对字面量（`document.title === 'Cadenza · Lilara'`）只有一块地方还能用：**没有会话时**
+#    的「退回品牌全名」——而那一处也只用「与刚才逐字相同」来验，不假造场地是空的。
+goto http://127.0.0.1:17994/#stage
+until document.querySelector('#conn').dataset.state === 'open'
+
+eval window.__mk = async (title) => (await cadenza.core.command({ kind: 'session.create', title })).sessionId; window.__row = (id) => [...document.querySelectorAll('.prog-row')].find(b => b.title.startsWith(id)); window.__say = (t) => { const i = document.querySelector('.composer-inp'); i.value = t; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; }; window.__n = (re) => { const m = (document.title || '').match(re); return m ? Number(m[1]) : 0; }; window.__chip = (sel) => Number(((document.querySelector(sel)?.textContent) || '').match(/(\d+)/)?.[1] || 0); 1
+
+;; ---- ⓪ 基线：这一刻标签题上各格的数（别的脚本留下的一律算进去，后面只看增量） ----
+wait 600
+eval window.__t0 = document.title; window.__run0 = window.__n(/♩(\d+) 在跑/); window.__err0 = window.__n(/✕(\d+) 出错/); window.__done0 = window.__n(/✓(\d+) 完成/); window.__errChip0 = window.__chip('.rs-err'); [window.__t0, window.__run0, window.__err0, window.__done0, window.__errChip0].join(' | ')
+
+;; ---- ① 打开这一场：顶栏出现「当前会话」，状态字与舞台头部同一个判据（phaseOf） ----
+eval (async () => { window.__T = await window.__mk('顶栏读数'); return window.__T; })()
+until !!window.__row(window.__T) ;; 8000
+eval window.__row(window.__T).click()
+until !!document.querySelector('.rs-sess') && !!document.querySelector('.sh-status') ;; 10000
+expect document.querySelector('.rs-sess .rs-title').textContent === '顶栏读数'
+expect document.querySelector('.rs-sess .rs-state').textContent === document.querySelector('.sh-status').textContent
+expect document.querySelector('.rs-sess').dataset.state === 'idle'
+;; 这一场停在休止 ⇒ 标签题那三个数一个都不该动（相对基线，不依赖「场地是空的」）
+expect window.__n(/♩(\d+) 在跑/) === window.__run0
+expect window.__n(/✕(\d+) 出错/) === window.__err0 && window.__n(/✓(\d+) 完成/) === window.__done0
+;; 全零时就是「品牌全名」那句话（与以前逐字相同）；非零时只要求仍以品牌结尾
+expect (window.__run0 || window.__err0 || window.__done0) ? /Cadenza$/.test(document.title) : document.title === 'Cadenza · Lilara'
+;; 「另外 N 个在跑」那格的基线：这一场自己不算（当前这一场有自己的那一格）
+eval window.__others0 = window.__chip('.rs-run'); Number.isFinite(window.__others0) ? window.__others0 : 0
+
+;; ---- ② 切到别的视图它还在（这一格存在的理由：舞台的头部跟着视图走了，它没走） ----
+eval location.hash = '#ledger'
+wait 400
+expect !!document.querySelector('.rs-sess')
+shot 60-runstate-ledger
+eval location.hash = '#stage'
+wait 300
+
+;; ---- ③ 跑起来：状态字跟着相位变、时长开始走、标签题的「在跑」加一 ----
+eval window.__say('slow please')
+until document.querySelector('.rs-sess').dataset.state === 'generating' ;; 10000
+expect document.querySelector('.rs-sess .rs-state').textContent === '谱曲'
+expect window.__n(/♩(\d+) 在跑/) === window.__run0 + 1
+until /\d/.test(document.querySelector('.rs-sess .rs-time')?.textContent || '') ;; 8000
+shot 61-runstate-running
+
+;; ---- ④ 停下来：状态字回落、时长那格**消失**（不挂着上一段的数字）、「在跑」退回基线 ----
+until document.querySelector('.rs-sess').dataset.state === 'idle' ;; 25000
+expect !document.querySelector('.rs-sess .rs-time')
+expect window.__n(/♩(\d+) 在跑/) === window.__run0
+
+;; ---- ⑤ 非瞬态失败：这一场那一格变红说「出错」，且**不**另起一个「✕ N 出错」----
+;; 当前这一场自己有那一格，两处同说一件事只会让人以为有两件事（「另外 N 个」才是那个计数）。
+eval window.__say('please fail now')
+until document.querySelector('.rs-sess').dataset.state === 'error' ;; 12000
+expect document.querySelector('.rs-sess .rs-state').textContent === '出错'
+;; 当前这一场**不**再在「另外 N 个出错」里数一遍：那一格停在基线（别的会话的错才算它）
+expect window.__chip('.rs-err') === window.__errChip0
+;; 标签题是**全局数**：这一场出错 ⇒ 「出错」那格加一，而且它排在「在跑」前面（最小化时那一格
+;; 就是「回去看看」的理由，截断时先保它）。
+expect window.__n(/✕(\d+) 出错/) === window.__err0 + 1
+expect document.title.indexOf('出错') >= 0
+shot 62-runstate-error
+
+;; ---- ⑥ 另一场在跑 / 跑完 / 出错：顶栏那几格与标签题的全局数，点了能跳过去 ----
+;; ⚠️ 这一场先**打开一次**再切回顶栏读数：头部对一场会话的「相位」是从订阅它的会话流里听来的，
+;; 而从没打开过的会话要等一次 /sessions 刷新才订阅得上（`待查看` / `doneAt` 本来就是这条限制）。
+;; 真实用法也是这样：起一场、切走、它在后台跑完。
+eval (async () => { window.__B = await window.__mk('后台那场'); return window.__B; })()
+until !!window.__row(window.__B) ;; 8000
+eval window.__row(window.__B).click()
+until cadenza.current === window.__B ;; 6000
+eval (async () => (await cadenza.core.command({ kind: 'session.send', sessionId: window.__B, blocks: [{ kind: 'text', text: 'slow please' }] })).accepted)()
+until document.querySelector('.rs-sess').dataset.state === 'generating' ;; 10000
+eval window.__row(window.__T).click()
+until cadenza.current === window.__T ;; 6000
+until window.__chip('.rs-run') === window.__others0 + 1 ;; 12000
+shot 63-runstate-others
+;; 标签题把「出错」和「在跑」一起报，且出错在前（优先级＝截断时的保留顺序）
+expect window.__n(/♩(\d+) 在跑/) === window.__run0 + 1
+expect document.title.indexOf('出错') >= 0 && document.title.indexOf('出错') < document.title.indexOf('在跑')
+;; 它自己停下了 ⇒ 那一格退回基线（顶栏不存「刚才是几」）；标签题换成「完成」：跑完了、还没打开看过
+until window.__chip('.rs-run') === window.__others0 ;; 30000
+until window.__n(/♩(\d+) 在跑/) === window.__run0 ;; 8000
+expect window.__n(/✓(\d+) 完成/) === window.__done0 + 1
+eval (async () => (await cadenza.core.command({ kind: 'session.send', sessionId: window.__B, blocks: [{ kind: 'text', text: 'please fail now' }] })).accepted)()
+until window.__chip('.rs-err') === window.__errChip0 + 1 ;; 12000
+;; 那一场现在「出错」了 ⇒ 从「完成」里摘掉，不再同一场数两遍
+expect window.__n(/✓(\d+) 完成/) === window.__done0
+expect window.__n(/✕(\d+) 出错/) === window.__err0 + 2
+eval document.querySelector('.rs-err').click()
+until cadenza.current === window.__B ;; 6000
+expect document.querySelector('.rs-sess .rs-state').textContent === '出错'
+;; 跳过去之后，那个计数改成数「顶栏读数」那一场（当前这一场有自己的那一格，不重复数它）
+expect window.__chip('.rs-err') === window.__errChip0 + 1
+expect document.querySelector('.rs-err').title.indexOf('顶栏读数: ') >= 0 || document.querySelector('.rs-err').title.indexOf('顶栏读数：') >= 0
+shot 64-runstate-jump
+
+logs

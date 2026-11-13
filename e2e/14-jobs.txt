@@ -29,6 +29,10 @@ expect /^job-[0-9a-f]{12}$/.test(window.__jid)
 ;; ---- ② 标题栏的「⏳ N 在跑」：数据来自打开会话时拉的那一次任务表 ----
 until !!document.querySelector('.chip.sh-jobs') ;; 10000
 expect /在跑/.test(document.querySelector('.chip.sh-jobs').textContent)
+;; 顶栏那一格（js/runstate.js）读的是**同一张表**（`mixer.jobsSummary`）：两处数字必须一样，
+;; 换了视图也还在（这就是它存在的理由）。⚠️ 顶栏不复用 `.chip`，判据用 `.rs-jobs`。
+expect !!document.querySelector('.rs-jobs')
+expect (document.querySelector('.rs-jobs').textContent.match(/\d+/) || [])[0] === (document.querySelector('.chip.sh-jobs').textContent.match(/\d+/) || [])[0]
 
 ;; ---- ③ 点工具卡那条路进任务面板（这是唯一不靠手点的入口，值得单独验） ----
 eval document.querySelector('.toolcall[data-tool="shell"] .tc-job').click()

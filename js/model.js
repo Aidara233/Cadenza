@@ -1,5 +1,5 @@
 // Cadenza · model — global store over the core: sessions, projects, approvals, registries.
-import { Emitter, store, toast } from "./util.js";
+import { Emitter, store, toast, fmtDur } from "./util.js";
 import { projectKeyOf } from "./core.js";
 
 export const app = {
@@ -416,6 +416,17 @@ export const phaseOf = (id) => {
   if (r.ask) return "waiting";
   return r.status === "Running" ? "generating" : "idle";
 };
+
+/**
+ * 一段连续运行的时长文本。**判据只此一处**：节目单的行、顶栏那一格都读它。
+ * - `runSince` 有值 ⇒ 正在跑，按此刻算（`runElapsedMs` 是此前累加的段，见 `onGlobalEvent`）；
+ * - 停着 ⇒ 交最后一段的长度（`null` = 这一场还没跑过，交空串而不是 `—`）。
+ */
+export function runtimeText(row, now = Date.now()) {
+  if (!row) return "";
+  if (row.runSince) return fmtDur((row.runElapsedMs || 0) + Math.max(0, now - row.runSince));
+  return row.runElapsedMs != null ? fmtDur(row.runElapsedMs) : "";
+}
 
 function toolNameOf(p) {
   if (p.askKind !== "permission") return "ask";

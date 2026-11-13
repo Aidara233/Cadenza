@@ -1,0 +1,94 @@
+# 手机（390×844）：一屏一件事。
+#
+# 舞台在手机上是一条**屏栈**：会话屏 → 节目单 / 调音台 / 概览（整屏，`#stage/<屏>`），
+# 顶栏那颗 ← 回上一层；四个视图的切换搬到下面那条 tab bar。
+# ⚠️ 这里验的是手指那一侧：没有横向溢出、顶栏每件都在视口里、输入框 16px、
+#    每屏的入口与返回都走通、tab bar 能切视图。桌面那档的几何由 `4-views-layout` 管。
+goto http://127.0.0.1:17994/#stage
+size 390 844
+until document.querySelector('#conn').dataset.state === 'open'
+until !!document.querySelector('.prog-row') ;; 12000
+
+# ---- 外壳：顶栏只剩「返回 / 标记 / 状态」，导航在底部 ----
+expect document.documentElement.scrollWidth <= innerWidth
+expect getComputedStyle(document.querySelector('.topbar .views')).display === 'none'
+expect getComputedStyle(document.querySelector('#tabbar')).display === 'flex'
+expect document.querySelectorAll('#tabbar .tab-btn').length === 4
+eval (() => [...document.querySelectorAll('.topbar > *')].filter((e) => !e.hidden && e.getBoundingClientRect().width > 0).map((e) => e.className + ':' + Math.round(e.getBoundingClientRect().right)).join(' | '))()
+expect (() => [...document.querySelectorAll('.topbar > *')].filter((e) => !e.hidden && e.getBoundingClientRect().width > 0).every((e) => e.getBoundingClientRect().right <= innerWidth + 0.5 && e.getBoundingClientRect().left >= -0.5))()
+shot 70-mobile-foyer
+
+# ---- 门厅 → 会话屏 ----
+eval document.querySelector('.prog-row').click()
+until document.querySelector('.stage').dataset.screen === 'session' ;; 8000
+# 等**真的**头部（骨架阶段也有标题，但还没有相位与那三颗入口）
+until !!document.querySelector('.sh-status') && !!document.querySelector('.sh-actions .sh-menu') ;; 10000
+until !!document.querySelector('.composer-inp') ;; 8000
+expect document.querySelector('.topbar-back').hidden
+expect location.hash === '#stage'
+expect getComputedStyle(document.querySelector('.composer-inp')).fontSize === '16px'
+# 头部只剩标题 / 相位 / 三颗入口：模型、回合、项目这些 chip 不再挤在标题下面
+eval (() => [...document.querySelectorAll('.sh-meta .chip')].filter((e) => getComputedStyle(e).display !== 'none').map((e) => e.className).join(' | '))()
+expect [...document.querySelectorAll('.sh-meta .chip')].filter((e) => getComputedStyle(e).display !== 'none').length <= 2
+expect document.documentElement.scrollWidth <= innerWidth
+shot 71-mobile-session
+
+# ---- 节目单屏（☰）：整屏、顶栏显示屏名、← 回得来 ----
+eval document.querySelector('.sh-menu').click()
+until document.querySelector('.stage').dataset.screen === 'list' ;; 4000
+expect location.hash === '#stage/list'
+expect !document.querySelector('.topbar-back').hidden
+expect document.querySelector('#topbar-title').textContent === '节目单'
+expect document.documentElement.scrollWidth <= innerWidth
+shot 72-mobile-list
+eval document.querySelector('.topbar-back').click()
+until document.querySelector('.stage').dataset.screen === 'session' ;; 4000
+expect location.hash === '#stage'
+
+# ---- 调音台屏（𝄢）----
+eval document.querySelector('.sh-mixer').click()
+until document.querySelector('.stage').dataset.screen === 'mixer' ;; 4000
+expect document.querySelector('#topbar-title').textContent === '调音台'
+expect document.querySelectorAll('.mix-tab').length >= 4
+expect document.documentElement.scrollWidth <= innerWidth
+shot 73-mobile-mixer
+eval document.querySelector('.topbar-back').click()
+until document.querySelector('.stage').dataset.screen === 'session' ;; 4000
+
+# ---- 概览屏（⋯）：元信息与全部动作都在这一屏 ----
+eval document.querySelector('.sh-about').click()
+until document.querySelector('.stage').dataset.screen === 'about' ;; 4000
+expect document.querySelector('#topbar-title').textContent === '概览'
+eval [...document.querySelectorAll('.about .kv-k')].map((e) => e.textContent).join(' | ')
+expect document.querySelectorAll('.about .kv-row').length >= 4
+expect document.querySelectorAll('.about-acts .btn').length >= 6
+expect document.documentElement.scrollWidth <= innerWidth
+shot 74-mobile-about
+eval document.querySelector('.topbar-back').click()
+until document.querySelector('.stage').dataset.screen === 'session' ;; 4000
+
+# ---- 会话里那句话：手机上的发送按钮点得到 ----
+eval (() => { const t = document.querySelector('.composer-inp'); t.value = '手机上的一句话'; t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; })()
+until document.querySelectorAll('.msg').length >= 1 ;; 12000
+expect (() => { const r = document.querySelector('.composer-send').getBoundingClientRect(); return r.height >= 34 && r.width >= 44; })()
+expect document.documentElement.scrollWidth <= innerWidth
+shot 75-mobile-reply
+
+# ---- 底部 tab bar 切视图，四个视图都不许横向拖 ----
+eval [...document.querySelectorAll('#tabbar .tab-btn')].find((b) => b.dataset.view === 'ledger').click()
+until location.hash === '#ledger' ;; 4000
+expect document.documentElement.scrollWidth <= innerWidth
+shot 76-mobile-ledger
+eval [...document.querySelectorAll('#tabbar .tab-btn')].find((b) => b.dataset.view === 'score').click()
+until location.hash === '#score' ;; 4000
+expect document.documentElement.scrollWidth <= innerWidth
+shot 77-mobile-score
+eval [...document.querySelectorAll('#tabbar .tab-btn')].find((b) => b.dataset.view === 'greenroom').click()
+until location.hash === '#greenroom' ;; 4000
+expect document.documentElement.scrollWidth <= innerWidth
+shot 78-mobile-greenroom
+eval [...document.querySelectorAll('#tabbar .tab-btn')].find((b) => b.dataset.view === 'stage').click()
+until location.hash === '#stage' ;; 4000
+expect document.querySelector('.stage').dataset.screen === 'session'
+
+logs

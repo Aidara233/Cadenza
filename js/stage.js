@@ -1,6 +1,6 @@
 // Cadenza · stage — the session view: programme (sidebar) · score (timeline) · mixer (inspector).
 import { h, $, swap, clear, uid, fmtTime, fmtAgo, fmtTokens, fmtNum, fmtDur, store, toast, confirmDlg, modal, debounce, copy, jsonBlock, baseName } from "./util.js";
-import { app, cmd, titleOf, projectLabel, dirOf, rememberDir, setCurrent, refreshSessions, refreshPresets, refreshProviders, scheduleRefresh, watchSession, unwatchSession, markLocal, phaseOf, seedRowFromSnapshot, setShowArchived, isArchived as isArchivedInModel, markArchived as markArchivedInModel } from "./model.js";
+import { app, cmd, titleOf, projectLabel, dirOf, rememberDir, setCurrent, refreshSessions, refreshPresets, refreshProviders, scheduleRefresh, watchSession, unwatchSession, markLocal, phaseOf, runtimeText, seedRowFromSnapshot, setShowArchived, isArchived as isArchivedInModel, markArchived as markArchivedInModel } from "./model.js";
 import { bobDelay, applyBob, onBob } from "./beat.js";
 import { Timeline } from "./timeline.js";
 import { cueCard, hydrate } from "./approvals.js";
@@ -22,7 +22,27 @@ const S = {
   collapsedParents: new Set(store.get("collapsedParents", [])),
   // 头部那个子会话面板：按会话记，纯内存——它是「此刻我在看谁的子树」，不是一条偏好。
   kidsOpen: new Set(),
+  // 手机上「一屏一件事」的当前屏（`session` / `list` / `mixer` / `about`）。
+  // ⚠️ 这里只存**名字**，怎么摆由 CSS 按宽度决定（≤760 整屏、≤1080 抽屉）。
+  screen: "session",
 };
+
+/**
+ * 手机上「一屏一件事」：`session`（会话）· `list`（节目单）· `mixer`（调音台）· `about`（概览）。
+ * ⚠️ 布局判据仍在 CSS（`≤760` 用小路由的整屏，`761–1080` 用调音台抽屉），这里只往根上挂
+ * `data-screen` 与 `drawer-mix` 两样东西——一个状态只在这一处写。
+ * 二级屏的入口都走 `bus.emit("screen", …)`：hash 只由 `app.js` 写，返回键的栈才只有一个主人。
+ */
+export function setStageScreen(name) {
+  S.screen = SCREENS.includes(name) ? name : "session";
+  if (!S.root) return;
+  S.root.dataset.screen = S.screen;
+  S.root.classList.toggle("drawer-mix", S.screen === "mixer");
+  if (S.screen === "about") renderAbout();
+}
+
+const SCREENS = ["session", "list", "mixer", "about"];
+const goScreen = (name, push = true) => app.bus.emit("screen", { name, push });
 
 export function mountStage(root) {
   S.root = root;
@@ -42,10 +62,16 @@ export function mountStage(root) {
     search, S.list, h("div.prog-f", arch));
 
   S.head = h("header.score-h");
+  S.about = h("section.about", { "aria-label": "概览" });
   S.tlRoot = h("div.score-scroll", { tabindex: "-1" });
   S.cues = h("div.cues", { "aria-live": "polite" });
   S.perf = h("div.perf", { hidden: true, role: "status" });
   S.input = h("textarea.composer-inp", { rows: 1, placeholder: "写下下一句…  Enter 发送 · Shift+Enter 换行", "aria-label": "消息" });
+  // 手机上那些键盘说法不成立（回车是换行、发送靠按钮）：窄到一栏时就只说「写下下一句」。
+  const narrowQ = matchMedia("(max-width: 760px)");
+  const ph = () => (narrowQ.matches ? "写下下一句…" : "写下下一句…  Enter 发送 · Shift+Enter 换行");
+  S.input.placeholder = ph();
+  narrowQ.addEventListener("change", () => { S.input.placeholder = ph(); });
   S.input.addEventListener("input", () => { autosize(); saveDraft(); });
   S.input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
@@ -95,7 +121,11 @@ export function mountStage(root) {
 
   const center = h("section.score", { "aria-label": "总谱" }, S.head, S.tlRoot, S.perf, S.cues, S.composer);
   S.mixRoot = h("aside.mixer", { "aria-label": "调音台" });
-  root.replaceChildren(S.side, center, S.mixRoot);
+  // 抽屉的遮罩：只在 761–1080 的调音台抽屉后面露出来（CSS 管），点它就收回会话屏。
+  S.scrim = h("div.scrim", { "aria-hidden": "true", onclick: () => goScreen("session", false) });
+  root.replaceChildren(S.side, center, S.mixRoot, S.about, S.scrim);
+  // Esc 回会话屏（桌面窄窗口顺手；手机没这个键）
+  addEventListener("keydown", (e) => { if (e.key === "Escape" && S.screen !== "session") { e.preventDefault(); goScreen("session", false); } });
   mixer.mount(S.mixRoot);
 
   // One source: every status-bearing piece of the stage redraws from the shared row.
@@ -144,7 +174,8 @@ function parseSessionFilter(value) {
 function escapeFilterRegExp(value) { return value.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&"); }
 
 // phase（model.js 派生的四态）而不是协议 status：每步之间核心会落回 Idle，照着画会一跳一跳。
-const STATUS = {
+// 顶栏那几格（js/runstate.js）读同一张表：相位只有一个说法。
+export const STATUS = {
   generating: { cls: "gen", label: "谱曲", glyph: "♩" },
   tools: { cls: "tool", label: "排练", glyph: "♩" },
   waiting: { cls: "wait", label: "候场", glyph: "𝄐" },
@@ -446,11 +477,6 @@ function updateSessionRow(li, r, depth = 0, orphan = false, kids = { count: 0, d
   S.runtimeNodes.set(r.sessionId, oldButton.querySelector(".pr-runtime"));
 }
 
-function runtimeText(r, now = Date.now()) {
-  if (r.runSince) return fmtDur((r.runElapsedMs || 0) + Math.max(0, now - r.runSince));
-  return r.runElapsedMs != null ? fmtDur(r.runElapsedMs) : "";
-}
-
 function tickRuntime() {
   const now = Date.now();
   for (const [id, node] of S.runtimeNodes || []) {
@@ -524,6 +550,8 @@ async function open(id) {
   // 真相在 `/state`；行由快照补（`seedRowFromSnapshot`）。真没了的会话在下面 404 时退回门厅。
 
   S.root.classList.add("has-session");
+  // 换了会话就回到会话屏（从节目单里点一行走的就是这条路——不回来，新会话会在列表屏背后打开）。
+  if (S.screen !== "session") goScreen("session", false);
   swap(S.head, headSkeleton(id));
   swap(S.tlRoot, h("div.tl-loading", h("div.tll-bars", h("i"), h("i"), h("i"), h("i")), h("span", "调音中…")));
   clear(S.cues);
@@ -614,6 +642,7 @@ function renderIdle() {
   const waiting = [...app.approvals.values()];
   const recent = [...app.sessions.values()].slice(0, 6);
   swap(S.head);
+  clear(S.about);
   S.composer.hidden = true;
   clear(S.cues);
   S.perf.hidden = true;
@@ -701,13 +730,81 @@ function renderHead() {
         spec.workingDirectory ? h("button.chip.sh-cwd", { type: "button", title: "复制工作目录 " + spec.workingDirectory, onclick: () => copy(spec.workingDirectory) }, "⌂ " + baseName(spec.workingDirectory)) : null),
       kidsOpen && kids.length ? kidsPanel(id, kids) : null),
     h("div.sh-actions",
+      // 手机上「一屏一件事」的三颗入口：☰ 节目单 · 𝄢 调音台 · ⋯ 概览（桌面各有别的去处，见 CSS）。
+      h("button.icon-btn.sh-menu", { type: "button", title: "节目单", "aria-label": "节目单", onclick: () => goScreen("list") }, "☰"),
+      h("button.icon-btn.sh-mixer", { type: "button", title: "调音台：轴 / 槽位 / 工具 / 任务", "aria-label": "调音台", onclick: () => goScreen("mixer") }, "𝄢"),
       h("button.btn.btn-sm", { type: "button", title: "推进一步（队列空也推，崩在步中后收回会话用）", onclick: () => cmd({ kind: "session.start", sessionId: id }) }, "▶ 推进"),
       h("button.btn.btn-sm", { type: "button", title: "把此前的上下文压成摘要检查点", onclick: () => compact() }, "𝄐 压缩"),
       h("button.btn.btn-sm.btn-ghost", { type: "button", title: "开一次回收窗口", onclick: () => cmd({ kind: "session.gc", sessionId: id }) }, "𝄒 回收"),
-      h("button.icon-btn", { type: "button", "aria-label": "更多操作", title: "更多", onclick: (e) => moreMenu(e.currentTarget) }, "⋯")));
+      h("button.icon-btn.sh-about", { type: "button", title: "概览（元信息与全部动作）", "aria-label": "概览", onclick: () => goScreen("about") }, "⋯"),
+      h("button.icon-btn.sh-more", { type: "button", "aria-label": "更多操作", title: "更多", onclick: (e) => moreMenu(e.currentTarget) }, "⋯")));
+  // 概览屏与头部同一份快照：这里顺带重画它，省得再挂一个「快照变了」的事件。
+  renderAbout();
 }
 
-/** 头部那个子会话面板：每行是**快照里的一个会话**，不是核心替我们算出来的摘要。 */
+/**
+ * 概览屏（手机上的 `⋯`）：会话头部在手机上只留「标题 + 相位 + 三颗入口」，
+ * 项目 / id / 模型 / 回合 / 父子 / 工作目录 / 归档这些**看一眼才需要**的东西全搬到这一屏，
+ * 连同全部动作（推进 / 压缩 / 回收 / 调音台 / 复制 id / 快照 / 归档 / 删除）。
+ * 桌面宽度下这块 `display:none`（那边头部本来就有 chip、⋯ 菜单里也有全部动作）。
+ */
+function renderAbout() {
+  const id = app.current;
+  if (!S.about || !id) return;
+  const spec = S.snap?.spec || {};
+  const row = app.sessions.get(id) || {};
+  const st = STATUS[phaseOf(id)] || STATUS.idle;
+  const archived = !!spec.archivedAt;
+  const kids = childrenOf(id);
+  const live = kids.filter((k) => !S.archived.has(k.sessionId));
+  const jobs = mixer.jobsSummary(id);
+  const kv = (k, v) => h("div.kv-row", h("span.kv-k", k), h("span.kv-v", v));
+  const act = (label, fn, cls = "btn") => h(`button.${cls}`, { type: "button", onclick: fn }, label);
+
+  // ⚠️ 这一屏**不复制头部那几样东西的类名**：`.sh-status` / `.sh-kid` 已经被头部与 e2e 当成
+  // 「头部那一格」在用（`7-sync` / `19-runstate` / `20-mobile` / `13-subagents`），同一份类名出现在
+  // 第二屏，选择器就开始同时命中两处——`13-subagents` 的 `.sh-kid` 计数就是这么变成 4 的。
+  // 相位这里只当一个普通字，样式自己一份（`.ab-phase`）。
+  swap(S.about,
+    h("header.about-h",
+      h("div", h("div.eyebrow", "Overview"), h("h2", spec.title || "无题")),
+      h("span.sp"),
+      h(`span.ab-phase.st-${st.cls}`, h("span.sh-dot"), st.label)),
+    h("section.card.about-card",
+      h("div.card-h", h("h3", "这一场"), h("span.sp")),
+      kv("项目", projectLabel(spec.projectKey || row.projectKey)),
+      kv("会话 id", h("code", id)),
+      kv("模型", h("code", `${spec.model?.providerId || "?"} / ${spec.model?.modelId || "?"}`)),
+      kv("回合", `第 ${S.snap?.state?.turn ?? row.turn ?? 0} 小节`),
+      spec.parentSessionId
+        ? kv("父会话", h("button.link", { type: "button", onclick: () => setCurrent(spec.parentSessionId) }, spec.parentSessionId))
+        : null,
+      kids.length ? kv("子会话", `${kids.length} 个（${live.length} 个未归档）`) : null,
+      spec.workingDirectory ? kv("工作目录", h("code", spec.workingDirectory)) : null,
+      spec.systemPromptPreset ? kv("预设", spec.systemPromptPreset) : null,
+      jobs?.total ? kv("后台任务", `${jobs.running} 个在跑 / 共 ${jobs.total} 个`) : null,
+      (S.snap?.goal?.active || row.goal?.active) ? kv("主动性", "goal：停回合自动续跑，直到 finish_goal") : null,
+      archived ? kv("归档", "已归档 " + fmtAgo(spec.archivedAt)) : null,
+      row.active === false ? kv("内存", "未载入（沉睡）") : null),
+    h("section.card",
+      h("div.card-h", h("h3", "动作"), h("span.sp")),
+      h("div.about-acts",
+        act("▶ 推进一步", () => cmd({ kind: "session.start", sessionId: id })),
+        act("压缩上下文", () => compact()),
+        act("回收窗口", () => cmd({ kind: "session.gc", sessionId: id })),
+        act("调音台", () => goScreen("mixer")),
+        act("复制 id", () => copy(id)),
+        act("原始快照", () => modal("会话快照 · /state", jsonBlock(S.snap), { wide: true })),
+        act(archived ? "取消归档" : "归档", async () => {
+          const ack = await cmd({ kind: "session.archive", sessionId: id, archived: !archived });
+          if (ack.accepted) { markArchivedInModel(id, !archived); reopen(); }
+        }),
+        act("删除…", () => del(id), "btn btn-danger"))));
+  // ⚠️ 这里**不画子会话面板**：节目单（☰）整屏就是那棵树，再挂一份 `.sh-kid` 会让头部的
+  // 「子会话」面板与 e2e 的计数同时命中两处（见上面 `.ab-phase` 那段注释）。
+  // 这一屏只留一格**读数**（有几个、几个未归档），要去点就去节目单。
+}
+
 function kidsPanel(id, kids) {
   const live = kids.filter((k) => !S.archived.has(k.sessionId));
   return h("div.sh-kidpanel", { role: "group", "aria-label": `子会话（${kids.length}）` },
@@ -810,6 +907,12 @@ function moreMenu(anchor) {
   const kids = childrenOf(id);
   const liveKids = kids.filter((k) => !S.archived.has(k.sessionId));
   const menu = h("div.menu", { role: "menu" },
+    // 窄屏时头部只剩「节目单 / 调音台 / ⋯」——推进 / 压缩 / 回收 要在这里还能找到，
+    // 否则手机上手边就少三条最常用的动作（桌面也一并放在这儿，同一批操作不该有两种走法）。
+    item("▶ 推进一步", () => cmd({ kind: "session.start", sessionId: id })),
+    item("𝄐 压缩上下文", () => compact()),
+    item("𝄒 开一次回收窗口", () => cmd({ kind: "session.gc", sessionId: id })),
+    h("hr"),
     item(archived ? "取消归档" : "归档", async () => {
       const ack = await cmd({ kind: "session.archive", sessionId: id, archived: !archived });
       if (ack.accepted) { markArchived(id, !archived); reopen(); }
@@ -871,22 +974,36 @@ function onEvent(p, topic, seq) {
     case "term.delta":
       tl.apply(p);
       break;
+    // ⚠️ **一条调用开始跑了**（核心 2026-11-05）。它带来的是时间线上**第一样**关于这次调用的东西
+    // ——比模型消息早得多（消息在步末才落盘）。交给时间线画成一张临时的「执行中」卡；
+    // 这里**不**叫 `refreshJobsSoon`：调用刚开始跑，任务表还没变（结果成形才有 `job-…`）。
+    case "tool.call.started":
+      tl.apply(p);
+      break;
     // Status itself is folded by model.onGlobalEvent (runs right after this) and redrawn in onRows.
     case "session.step.begin":
       // 新的一步 ⇒ 上一段临时正文作废（正常路径上 `message.appended` 已经收掉它；
       // 这一条保证「残留的临时气泡不会跨步活着」）。
       tl.clearLive();
+      // 「执行中」那行同样跨不过步：上一步的调用要么已经随模型消息落盘（那张卡接手了结果），
+      // 要么压根没落盘（被打断）——后一种情况下 `settleRunning` 会把结果画成孤儿，
+      // 那是事实，不是残留。
+      tl.settleRunning();
       S.retryNote = null;
       break;
     case "session.step.end":
       // 这一步结束了：拒答 / 空块那两条**不会发模型消息**，临时气泡只能在这里收。
       tl.clearLive();
+      tl.settleRunning();
       S.retryNote = null;
       if (p.refused) tl.note("error", ["模型拒答了这一步", p.stopReason ? h("code", p.stopReason) : null]);
       break;
     case "session.state":
       // 落回非 Running ⇒ 这一步不再吐增量了；留着半个气泡就是对没发生的事撒谎。
-      if (p.status !== "Running") tl.clearLive();
+      // 「执行中」那行同理：调用早该收尾了，还挂着「执行中」就是对没在跑的进程撒谎。
+      // ⚠️ 这里只清**临时行**，不 `settleRunning`——`session.state` 是磁盘镜像、每步都发一条，
+      // 在它上面判定「这条结果没主人了」太早（模型消息可能还在同一步的事件之后）。
+      if (p.status !== "Running") { tl.clearLive(); tl.clearRunning(); }
       if (S.snap?.state) { S.snap.state.status = p.status; S.snap.state.turn = p.turn; }
       if (p.status !== "Running") S.retryNote = null;
       break;

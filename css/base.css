@@ -42,12 +42,18 @@
   --ease: cubic-bezier(.2, .8, .2, 1);
   --topbar-h: 58px;
   --status-h: 28px;
+  /* 手机底部主导航的高度；桌面上是 0（那个 nav 本身 `display:none`），
+     grid 模板与 toast 的底部偏移都读它，只此一处。 */
+  --tabbar-h: 0px;
   /* 节目单那条波浪的节拍（js/beat.js 会覆盖它） */
   --bob: 1100ms;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
 html, body { height: 100%; }
+/* 手机上这两个是必调的：`-webkit-text-size-adjust` 关掉 iOS 横屏自己放大字号；
+   `overscroll-behavior` 关掉“整页橡皮筋 / 下拉刷新”，否则在消息流里往上滑一下就把页面刷了。 */
+html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
   background:
@@ -58,6 +64,12 @@ body {
   font: 14px/1.55 var(--sans);
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+  overscroll-behavior: none;
+}
+/* 触控：去掉 iOS 长按选中/高亮按钮的那一层灰，双击缩放也没必要（`manipulation`）。 */
+button, .btn, .view-tab, .rs-chip, .chip, .prog-row, .mix-tab, .seg-b, .fr, .pal-item {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 body::before {
   /* film grain — subtle, static */
@@ -197,8 +209,11 @@ dialog.dlg[open] { animation: dlg-in .22s var(--ease); }
 .dlg-typed { display: grid; gap: 6px; margin: 14px 0 0; font-size: 12.5px; color: var(--paper-3); }
 .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 
+/* ---------- 手机的外壳件（只在窄屏露头；桌面 `display:none`） ---------- */
+.topbar-back, .topbar-title, .tabbar { display: none; }
+
 /* ---------- toast ---------- */
-#toasts { position: fixed; right: 18px; bottom: calc(var(--status-h) + 14px); z-index: 90; display: grid; gap: 8px; justify-items: end; pointer-events: none; }
+#toasts { position: fixed; right: 18px; bottom: calc(var(--status-h) + var(--tabbar-h) + 14px); z-index: 90; display: grid; gap: 8px; justify-items: end; pointer-events: none; }
 .toast {
   display: flex; align-items: center; gap: 10px; max-width: 440px; padding: 10px 14px; border-radius: 12px;
   background: rgba(36, 31, 25, .96); border: 1px solid var(--line); box-shadow: var(--shadow); font-size: 13px;
@@ -209,6 +224,29 @@ dialog.dlg[open] { animation: dlg-in .22s var(--ease); }
 .t-ok .toast-dot { background: var(--verdigris); box-shadow: 0 0 10px var(--verdigris); }
 .t-warn .toast-dot { background: var(--brass); box-shadow: 0 0 10px var(--brass); }
 .t-err .toast-dot { background: var(--vermilion); box-shadow: 0 0 10px var(--vermilion); }
+
+/* ---------- 手机（≤640）----------
+   这一档不是「把桌面缩小」：字号、触控目标、弹层高度都按手指来。
+   ⚠️ 输入框一律 16px：iOS 在字号 <16px 的输入框上聚焦会把整页放大，且不会自己缩回去。 */
+@media (max-width: 640px) {
+  :root { --topbar-h: 52px; --status-h: 26px; }
+  /* 输入框 16px 防 iOS 聚焦放大。⚠️ `.composer-inp` 的这条在 stage.css 里——它那儿有同名的
+     shorthand 规则，而 stage.css 在 base.css 之后加载，写在这里会被盖回去。 */
+  .inp, .sel, .txt, .pal-inp { font-size: 16px; }
+  .inp, .sel { min-height: 40px; }
+  .btn { height: 38px; }
+  .btn-sm { height: 32px; font-size: 12.5px; }
+  .icon-btn { width: 38px; height: 38px; }
+  .field .txt { font-size: 15px; }
+  /* 弹层：`dvh` 跟着地址栏走，`vh` 会算到屏幕外去 */
+  dialog.dlg { max-height: calc(100dvh - 24px); border-radius: 14px; }
+  .dlg-body { padding: 18px 16px 16px; max-height: calc(100dvh - 26px); }
+  .dlg-actions { flex-wrap: wrap; }
+  .dlg-actions .btn { flex: 1; }
+  #toasts { left: 10px; right: 10px; justify-items: stretch; bottom: calc(var(--status-h) + 10px); }
+  .toast { max-width: none; }
+  pre.json { max-height: 56dvh; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; scroll-behavior: auto !important; }

@@ -151,6 +151,8 @@ while (true)
         else if (content.Contains("edge"))
             // Table whose delimiter and body rows omit the edge pipes, with a cell-count mismatch.
             message = Text("| 检查 | 结果 |\n---|---\n源块默认值未声明 | 报错 |\n| ok | fine | extra |\n\n收工。", null);
+        else if (content.Contains("大表"))
+            message = Text(BigTable(), null);
         else if (content.Contains("slow"))
         {
             await Task.Delay(6000);
@@ -341,6 +343,21 @@ static IEnumerable<string> Pieces(string s, int n)
     }
 }
 static string Trunc(string s) => s.Length > 40 ? s[..40] + "…" : s;
+
+// 大表格：列多、行多、既有数字列也有长文本列。用来验三件事——谱线不再从表格中间穿过去、
+// 数字列靠右等宽、表头在竖向滚动时吸顶（截图 29-big-table）。
+static string BigTable()
+{
+    var sb = new StringBuilder("## 构建矩阵\n\n随便看看这张表。\n\n");
+    sb.Append("| 序号 | 组件 | 状态 | 行数 | 覆盖率 | 耗时 | 大小 | 备注 |\n");
+    sb.Append("|---:|---|---|---:|---:|---:|---:|---|\n");
+    for (var i = 1; i <= 24; i++)
+    {
+        var state = i % 7 == 0 ? "跳过" : i % 5 == 0 ? "重试" : "通过";
+        sb.Append($"| {i} | kernel/module-{i:00} | {state} | {i * 137} | {80 + i % 20}.{i % 10}% | {i * 41}ms | {i}.{i % 9}k | 第 {i} 行：一句有点长的备注，用来看换行与列宽是不是还挤 |\n");
+    }
+    return sb.ToString();
+}
 
 // 对话里出现过的第一个 `job-…`（模板文本，不含正则之外的转义）。mock 自己不知道任务 id，
 // 而 `wait` 需要一个真的——它本来就在前面的工具结果里。

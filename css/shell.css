@@ -1,10 +1,14 @@
 /* Cadenza · shell — topbar, views, status bar, banner, palette. */
 
-body { display: grid; grid-template-rows: var(--topbar-h) auto minmax(0, 1fr) var(--status-h); height: 100vh; }
+/* `100dvh`：手机地址栏收起/展开会改可视高度，`vh` 是按「最大」算的，
+   用 vh 会让底下的状态栏/输入区被地址栏盖住一截。旧浏览器读不懂 dvh 时会用前一行。 */
+body { display: grid; grid-template-rows: var(--topbar-h) auto minmax(0, 1fr) var(--status-h) var(--tabbar-h); height: 100vh; height: 100dvh; }
 body > .topbar { grid-row: 1; }
 body > .banner { grid-row: 2; }
 body > main { grid-row: 3; }
 body > .statusbar { grid-row: 4; }
+/* 手机底部主导航占第 5 行；桌面 `--tabbar-h: 0` 且元素本身 `display:none`。 */
+body > .tabbar { grid-row: 5; }
 
 .topbar {
   position: relative; z-index: 5; display: flex; align-items: center; gap: 18px; padding: 0 16px 0 18px;
@@ -67,12 +71,46 @@ body > .statusbar { grid-row: 4; }
 .slider { width: 100%; accent-color: var(--brass); }
 
 .top-right { display: flex; align-items: center; gap: 10px; flex: none; }
+
+/* ---------- 顶栏「运行状态」（js/runstate.js） ----------
+   放在 等你 / 搜索 / 连接 的左边：切到总谱、账簿、后台时，舞台的头部与演奏条都不在眼前，
+   这几格才是「它还在跑吗」的读数。
+   ⚠️ 类名一律 `rs-`，不复用 `.chip`：`.chip.sh-jobs` / `.chip.goal` 在舞台头部与 e2e 里
+   指的是会话头部那一格，顶栏再放一个同形的类，等于给「这个选择器选中了谁」埋雷。 */
+.runstate { display: flex; align-items: center; gap: 6px; flex: none; min-width: 0; }
+/* 门厅（没有当前会话、也没有别的会话在跑）时整块让位：空 div 会在 top-right 里白占一个 gap。 */
+.runstate:empty { display: none; }
+.rs-chip {
+  display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; min-width: 0;
+  border-radius: 999px; cursor: pointer; white-space: nowrap;
+  background: var(--ink-0); border: 1px solid var(--line-soft); color: var(--paper-3);
+  font: 500 11.5px/1 var(--sans);
+  transition: color .15s, border-color .15s, background .2s;
+}
+.rs-chip:hover { color: var(--paper); border-color: var(--line); background: var(--ink-2); }
+.rs-glyph { font: 13px/1 var(--serif); }
+.rs-title { max-width: 16ch; overflow: hidden; text-overflow: ellipsis; color: var(--paper-2); }
+.rs-time { color: var(--paper-4); font-size: 11px; }
+.rs-dim { color: var(--paper-4); font-size: 10.5px; }
+/* 当前会话的颜色跟着相位走，与舞台头部 `.sh-status.st-*`（节目单的 `.st-*`）同一套语义：
+   谱曲＝铜绿 · 排练＝天蓝 · 候场＝黄铜 · 休止＝灰 · 出错＝朱红 */
+.rs-sess[data-state="generating"] { color: #a6e3d0; background: var(--verdigris-dim); border-color: rgba(111, 194, 168, .38); }
+.rs-sess[data-state="tools"] { color: #bcd8f5; background: var(--sky-dim); border-color: rgba(127, 179, 232, .35); }
+.rs-sess[data-state="waiting"] { color: var(--brass-2); background: var(--brass-dim); border-color: rgba(224, 173, 79, .4); }
+.rs-sess[data-state="error"] { color: #ffb3a8; background: var(--vermilion-dim); border-color: rgba(239, 106, 76, .42); }
+.rs-sess[data-state="error"] .rs-title { color: #ffcfc4; }
+.rs-run, .rs-jobs { color: #a6e3d0; background: var(--verdigris-dim); border-color: rgba(111, 194, 168, .38); }
+.rs-goal { color: var(--brass-2); background: var(--brass-dim); border-color: rgba(224, 173, 79, .45); font-weight: 600; }
+.rs-err { color: #ffb3a8; background: var(--vermilion-dim); border-color: rgba(239, 106, 76, .45); }
+
 .kbd-btn {
   display: inline-flex; align-items: center; gap: 4px; height: 30px; padding: 0 8px 0 12px; border-radius: 999px; cursor: pointer;
   background: var(--ink-0); border: 1px solid var(--line-soft); color: var(--paper-4); font: 12px var(--sans);
 }
 .kbd-btn span { margin-right: 6px; }
 .kbd-btn:hover { color: var(--paper-2); border-color: var(--line); }
+/* 手机上键盘不存在：⌕ 只在这一档露出来（`≤1100` 时文字先收掉，`≤640` 时键帽也收掉）。 */
+.kbd-glyph { display: none; }
 .cue-btn {
   display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 999px; cursor: pointer;
   border: 1px solid rgba(224, 173, 79, .5); background: var(--brass-dim); color: var(--brass-2); font: 600 12.5px var(--sans);
@@ -154,11 +192,83 @@ dialog.palette[open] { animation: dlg-in .18s var(--ease); }
 .pal-item mark { background: none; color: var(--brass-2); font-weight: 600; }
 .pal-foot { display: flex; gap: 14px; padding: 8px 16px; border-top: 1px solid var(--line-soft); font-size: 11px; color: var(--paper-4); }
 
+@media (max-width: 1280px) {
+  .rs-title { max-width: 9ch; }
+}
 @media (max-width: 1100px) {
-  .brand-sub, .kbd-btn span { display: none; }
+  .brand-sub, .kbd-btn .kbd-text { display: none; }
+  /* 顶栏先让出「环境信息」：演奏中 / 任务 / 目标 在舞台头部与节目单里都还有；
+     出错与当前会话留着——它们正是切到别的视图时唯一还在说这话的地方。 */
+  .rs-run, .rs-jobs, .rs-goal { display: none; }
+  .rs-chip { padding: 0 7px; }
+}
+@media (max-width: 900px) {
+  /* 再窄就只留「哪一场 · 什么相位 · 跑了多久」——标题在节目单与舞台头部都还读得到。 */
+  .rs-title { display: none; }
 }
 @media (max-width: 820px) {
   .staff-wrap { display: none; }
   .view-tab { padding: 0 10px; }
   .vt-roman { display: none; }
+}
+
+/* 手机顶栏（≤760）：页签搬到下面的 tab bar，这里只留「返回 / 屏名 / 状态」。
+   状态栏也一起收起来——连接点在顶栏，会话数在后台视图里。 */
+@media (max-width: 760px) {
+  .topbar { gap: 8px; padding-left: 10px; padding-right: 10px; }
+  .topbar-back {
+    display: inline-grid; place-items: center; width: 34px; height: 34px; flex: none;
+    border-radius: 999px; border: 1px solid var(--line-soft); background: var(--ink-0);
+    color: var(--paper-2); font: 16px/1 var(--serif); cursor: pointer;
+  }
+  .topbar-back:active { background: var(--ink-3); }
+  .topbar-title { display: block; font: 600 13px/1 var(--sans); color: var(--paper-2); letter-spacing: .04em; white-space: nowrap; }
+  /* 二级屏上顶栏只说一件事：屏名顶着品牌标记的位置 */
+  .topbar.sub .brand { display: none; }
+  .topbar .views { display: none; }
+  .statusbar { display: none; }
+  :root { --tabbar-h: calc(50px + env(safe-area-inset-bottom)); --status-h: 0px; }
+  .tabbar {
+    display: flex; align-items: stretch; padding-bottom: env(safe-area-inset-bottom);
+    background: rgba(20, 17, 14, .96); border-top: 1px solid var(--line-soft); backdrop-filter: blur(8px);
+  }
+  .tab-btn {
+    position: relative; flex: 1; display: flex; align-items: center; justify-content: center;
+    height: 50px; border: 0; background: none; color: var(--paper-3);
+    font: 500 13px/1 var(--sans); cursor: pointer;
+  }
+  .tab-btn[aria-current="page"] { color: var(--brass-2); }
+  .tab-btn[aria-current="page"]::before {
+    content: ""; position: absolute; top: 0; left: 32%; right: 32%; height: 2px; border-radius: 2px;
+    background: var(--brass); box-shadow: 0 0 10px var(--brass-glow);
+  }
+}
+
+/* ---------- 手机顶栏（≤640）----------
+   390px 里要放下：标记 + 四个视图 + 等你 + 搜索 + 连接。能省的只有「字」：
+   品牌名、连接的文字、Ctrl/K 键帽。运行状态那几格留给标签题与舞台头部，
+   只在**出错**时留一格（那一格是红的，一眼就能看见）。 */
+@media (max-width: 640px) {
+  :root { --topbar-h: calc(52px + env(safe-area-inset-top)); --status-h: calc(26px + env(safe-area-inset-bottom)); }
+  .topbar { gap: 8px; padding: 0 10px; padding-top: env(safe-area-inset-top); }
+  .brand-mark { width: 26px; height: 26px; }
+  .brand-word, .brand-sub { display: none; }
+  .views { gap: 0; padding: 2px; }
+  .view-tab { height: 32px; padding: 0 9px; font-size: 12.5px; line-height: 32px; }
+  .top-right { gap: 6px; }
+  .rs-sess, .rs-run, .rs-jobs, .rs-goal { display: none; }
+  .rs-chip { height: 24px; font-size: 11px; }
+  .cue-btn { height: 30px; padding: 0 10px; font-size: 12px; }
+  .cue-fermata { font-size: 15px; }
+  .kbd-btn { height: 30px; padding: 0 9px; }
+  .kbd-btn kbd { display: none; }
+  .kbd-glyph { display: inline; font-family: var(--serif); font-size: 15px; line-height: 1; }
+  .conn { min-width: 0; }
+  .conn-text { display: none; }
+  /* 状态栏：窄屏只留「版本 / 会话 / 提供商」——核心地址那一格在手机上又长又不常看，
+     帧数与工作目录更是只有调试时才要。
+     ⚠️ 选择器都要带上 `.statusbar`：`.statusbar .sb-item { display: inline-flex }` 是两条类，
+     光写 `.sb-core` 一条类是盖不住的（display 会被它抢回去）。 */
+  .statusbar { gap: 10px; padding: 0 10px; padding-bottom: env(safe-area-inset-bottom); font: 11px/1.5 var(--mono); overflow: hidden; }
+  .statusbar .sb-core, .statusbar .sb-ver, .statusbar .sb-cwd, .statusbar .sb-frames { display: none; }
 }

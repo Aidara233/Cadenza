@@ -19,6 +19,10 @@ function inline(s) {
 // pipe-looking prose line is mistaken for a table separator and the header is left alone.
 const isSep = (l) => l.includes("|") && /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(l);
 
+// A cell that is nothing but a number (thousands separators, a unit, a decimal): those columns
+// get right-aligned + tabular figures. Anything with words, dates or ranges stays left.
+const NUM = /^[−-]?\d[\d,._]*\s?(%|px|ms|s|k|K|M|B|x|×|倍|次|行)?$/;
+
 // Edge pipes are optional (GFM), and both the separator check and row collection use this —
 // mixing two notions of "row" is what let a header-only table through.
 function cellsOf(r) {
@@ -29,12 +33,23 @@ function cellsOf(r) {
 }
 
 function table(rows) {
-  const cells = cellsOf;
-  const head = cells(rows[0]);
-  const aligns = rows[1] ? cells(rows[1]).map((c) => (/^:-+:$/.test(c) ? "center" : /-+:$/.test(c) ? "right" : "")) : [];
-  const td = (tag, c, i) => `<${tag}${aligns[i] ? ` style="text-align:${aligns[i]}"` : ""}>${inline(c)}</${tag}>`;
-  let out = "<div class=\"md-table\"><table><thead><tr>" + head.map((c, i) => td("th", c, i)).join("") + "</tr></thead><tbody>";
-  for (const r of rows.slice(2)) out += "<tr>" + cells(r).map((c, i) => td("td", c, i)).join("") + "</tr>";
+  const head = cellsOf(rows[0]);
+  const aligns = rows[1] ? cellsOf(rows[1]).map((c) => (/^:-+:$/.test(c) ? "center" : /-+:$/.test(c) ? "right" : "")) : [];
+  // ⚠️ Trim/pad every body row to the header width (same as GFM). Rows whose `<td>` count differs
+  // make the browser stretch the grid, and one long table then looks like it's wobbling column by column.
+  // Dropping a cell someone wrote too many of is cheaper than a crooked grid.
+  const body = rows.slice(2).map((r) => {
+    const c = cellsOf(r);
+    while (c.length < head.length) c.push("");
+    return c.slice(0, head.length);
+  });
+  // Columns where every cell is a number: right-aligned + tabular figures. Left-aligned numbers in a
+  // long table can't be compared at a glance (that's half of 「大表格显得挤」).
+  const num = head.map((_, i) => body.length > 0 && body.some((r) => r[i]) && body.every((r) => !r[i] || NUM.test(r[i])));
+  const cell = (tag, c, i) =>
+    `<${tag}${tag === "th" ? ' scope="col"' : ""}${num[i] ? ' class="num"' : ""}${aligns[i] ? ` style="text-align:${aligns[i]}"` : ""}>${inline(c)}</${tag}>`;
+  let out = "<div class=\"md-table\"><table><thead><tr>" + head.map((c, i) => cell("th", c, i)).join("") + "</tr></thead><tbody>";
+  for (const r of body) out += "<tr>" + r.map((c, i) => cell("td", c, i)).join("") + "</tr>";
   return out + "</tbody></table></div>";
 }
 

@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <title>Cadenza · Lilara</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23161310'/%3E%3Cpath d='M8 9h16M8 13h16M8 17h16M8 21h16M8 25h16' stroke='%23574b3c' stroke-width='1'/%3E%3Cellipse cx='14' cy='21' rx='3.6' ry='2.6' transform='rotate(-20 14 21)' fill='%23e0ad4f'/%3E%3Cpath d='M17.2 20V7.5' stroke='%23e0ad4f' stroke-width='1.6'/%3E%3C/svg%3E">
@@ -15,6 +15,10 @@
 <a class="skip" href="#main">跳到主内容</a>
 
 <header class="topbar">
+  <!-- 手机上的「上一层」：只在二级屏（节目单 / 调音台 / 概览）露出来，桌面隐藏 -->
+  <button class="topbar-back" id="topbar-back" type="button" aria-label="返回" hidden>←</button>
+  <!-- 手机上「你在哪一屏」：二级屏时顶栏显示屏名（桌面隐藏） -->
+  <span class="topbar-title" id="topbar-title" hidden></span>
   <div class="brand" aria-label="Cadenza">
     <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
       <path d="M3 9h26M3 13h26M3 17h26M3 21h26M3 25h26" class="brand-staff"/>
@@ -38,11 +42,13 @@
   </div>
 
   <div class="top-right">
+    <!-- 运行状态：当前会话 / 出错 / 演奏中 / 后台任务 / 目标（js/runstate.js 往里画，空着就整块没宽度） -->
+    <div class="runstate" id="runstate" role="group" aria-label="运行状态"></div>
     <button class="cue-btn" id="cue-btn" aria-haspopup="dialog" hidden>
       <span class="cue-fermata" aria-hidden="true">𝄐</span><span id="cue-count">0</span> 等你
     </button>
-    <button class="kbd-btn" id="palette-btn" aria-keyshortcuts="Control+K" title="命令面板">
-      <span>搜索与命令</span><kbd>Ctrl</kbd><kbd>K</kbd>
+    <button class="kbd-btn" id="palette-btn" aria-keyshortcuts="Control+K" title="命令面板" aria-label="搜索与命令">
+      <span class="kbd-glyph" aria-hidden="true">⌕</span><span class="kbd-text">搜索与命令</span><kbd>Ctrl</kbd><kbd>K</kbd>
     </button>
     <div class="conn" id="conn" role="status" aria-live="polite">
       <span class="conn-dot" aria-hidden="true"></span><span class="conn-text">连接中</span>
@@ -60,6 +66,8 @@
 </main>
 
 <footer class="statusbar" id="statusbar"></footer>
+<!-- 手机底部主导航（只在 ≤760 显示）：顶栏那些页签挪到手指够得着的地方 -->
+<nav class="tabbar" id="tabbar" aria-label="视图"></nav>
 <div id="toasts" aria-live="polite" role="status"></div>
 
 <script type="module" src="js/app.js"></script>

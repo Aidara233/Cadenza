@@ -58,7 +58,10 @@ size 900 900
 eval location.hash = '#stage'
 wait 600
 expect document.documentElement.scrollWidth <= innerWidth
-expect getComputedStyle(document.querySelector('.mixer')).display === 'none'
+# ≤1080 时调音台不再 `display:none`，而是收成右侧抽屉：还在 DOM 里、`display:block`，
+# 但整块被 translate 到视口右边之外（`≤760` 时节目单同理，左侧）。开合的判据在 `20-mobile`。
+expect getComputedStyle(document.querySelector('.mixer')).display === 'block'
+expect document.querySelector('.mixer').getBoundingClientRect().left >= innerWidth - 1
 shot 17-narrow
 size 1600 1000
 logs

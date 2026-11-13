@@ -2,11 +2,12 @@
 import { $, $$, h, swap, store, toast, fmtNum } from "./util.js";
 import { Core, resolveCoreBase } from "./core.js";
 import { app, loadRegistries, refreshSessions, refreshPresets, onGlobalEvent, setCurrent, scheduleRefresh, resetSubscriptions } from "./model.js";
-import { mountStage, newSessionDialog, focusComposer } from "./stage.js";
+import { mountStage, newSessionDialog, focusComposer, setStageScreen } from "./stage.js";
 import { mountScore, scoreShown } from "./score.js";
 import { mountLedger, ledgerShown } from "./ledger.js";
 import { mountGreenRoom, greenRoomShown } from "./greenroom.js";
 import { mountViz } from "./viz.js";
+import { mountRunState } from "./runstate.js";
 import { openPalette } from "./palette.js";
 import { setCoreBase } from "./blocks.js";
 
@@ -26,8 +27,16 @@ async function boot() {
   mountLedger($("#view-ledger"));
   mountGreenRoom($("#view-greenroom"));
   mountViz($("#staff"), $("#tempo"));
+  // 顶栏那几格运行状态：切到哪个视图都在（舞台的头部与演奏条只管舞台）。
+  mountRunState($("#runstate"));
 
   for (const b of $$(".view-tab")) b.addEventListener("click", () => go(b.dataset.view));
+  // 手机底部主导航（≤760 才显示，桌面 `display:none`）：同一份 `app.view`。
+  mountTabbar();
+  $("#topbar-back").addEventListener("click", () => applyStageScreen("session", { push: false }));
+  // 舞台自己的两颗按钮（☰ 节目单 / 调音台 / ⋯ 概览）不直接改 hash：由这里统一写，
+  // 一个写者——两处各写一半，返回键的栈迟早会乱。
+  app.bus.on("screen", (spec) => applyStageScreen(typeof spec === "string" ? spec : spec?.name, { push: spec?.push !== false }));
   $("#palette-btn").addEventListener("click", openPalette);
   $("#cue-btn").addEventListener("click", jumpToCue);
   app.bus.on("goto", go);
@@ -50,9 +59,21 @@ async function boot() {
   // 核心要 token 而这次没带对（或缺）⇒ 铺一层闸。`hadToken` 只影响闸上那句原因的说法。
   app.core.on("auth", (d) => openTokenGate(d.reason));
 
-  const initial = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : store.get("view", "stage");
-  go(initial, true);
-  addEventListener("hashchange", () => { const v = location.hash.slice(1); if (VIEWS.includes(v)) go(v); });
+  const initial = parseHash();
+  go(VIEWS.includes(initial.view) ? initial.view : "stage", true);
+  mountTabbar();
+  // 舞台的 `data-screen` 一开始就得有值：否则第一帧里「哪一屏」是空的，
+  // 而 CSS 只在 `[data-screen=…]` 上才切屏（空值什么都看不到）。
+  // ⚠️ 但**别在别的视图上写 hash**：见 `applyStageScreen` 的注释（那会让人刷新一次就退回舞台）。
+  const onStage = initial.view === "stage" || !initial.view;
+  applyStageScreen(onStage ? initial.sub || "session" : "session", { push: false, hash: onStage });
+  // 手机上的二级屏用 pushState 进栈：浏览器 / Android 的返回键要能一层层退回来。
+  addEventListener("hashchange", () => {
+    const r = parseHash();
+    if (!VIEWS.includes(r.view)) return;
+    if (r.view !== app.view) go(r.view);
+    if (r.view === "stage") applyStageScreen(r.sub || "session", { push: false });
+  });
   keyboard();
 
   const info = await app.core.probe();
@@ -77,19 +98,70 @@ async function boot() {
   renderStatus();
 }
 
+/**
+ * `#view` 或 `#stage/mixer` 这种小路由：**只有舞台有二级屏**（节目单 / 调音台 / 概览）。
+ * 桌面宽度下这些屏不成立（两个栏本来就在），所以子路径在桌面上不会带来任何视觉副作用。
+ */
+function parseHash() {
+  const [view = "", sub = ""] = location.hash.slice(1).split("/");
+  return { view, sub };
+}
+
+const SCREEN_LABEL = { list: "节目单", mixer: "调音台", about: "概览" };
+
+/**
+ * 二级屏：写进 hash（手机返回键能退）+ 让舞台切屏 + 更新顶栏那颗返回键与屏名。
+ *
+ * ⚠️ `hash:false` 是给**启动**用的：这里写的 hash 一律是 `#stage…`，而在后台 / 总谱 / 账簿 上
+ * 调它等于把地址改回舞台——刷新一次就退回舞台，`#greenroom` 那样的一级视图**一次都不渲染**
+ * （`2-flow` 的 reset 就是一次 `location.reload()`，翻车在「回来后要在后台页上找 `.prov-new`」）。
+ * ⇒ 只有启动时 hash 本来就是舞台（或者根本没有 hash），才许它写。
+ */
+function applyStageScreen(name, { push = true, hash = true } = {}) {
+  const sub = name && name !== "session" ? name : "";
+  const want = "#stage" + (sub ? "/" + sub : "");
+  if (hash && location.hash !== want) {
+    const url = location.pathname + location.search + want;
+    if (push) history.pushState(null, "", url);
+    else history.replaceState(null, "", url);
+  }
+  setStageScreen(sub || "session");
+  const back = $("#topbar-back");
+  back.hidden = !sub;
+  back.title = sub ? `回到会话（现在是${SCREEN_LABEL[sub] || sub}）` : "";
+  const crumb = $("#topbar-title");
+  crumb.textContent = sub ? SCREEN_LABEL[sub] || "" : "";
+  crumb.hidden = !sub;
+  // 二级屏时顶栏用「屏名」代替品牌标记（手机上那块宽度只够说一件事）。
+  $(".topbar").classList.toggle("sub", !!sub);
+}
+
 function go(view, initial = false) {
   if (!VIEWS.includes(view)) return;
   const changed = app.view !== view;
   app.view = view;
   store.set("view", view);
-  if (location.hash.slice(1) !== view) history.replaceState(null, "", location.pathname + location.search + "#" + view);
-  for (const b of $$(".view-tab")) b.setAttribute("aria-current", b.dataset.view === view ? "page" : "false");
+  // 换视图时保留舞台的子路径（`#stage/mixer` → 切到账簿再回来还在调音台）。
+  const sub = view === "stage" ? parseHash().sub : "";
+  const hash = "#" + view + (sub ? "/" + sub : "");
+  if (location.hash !== hash) history.replaceState(null, "", location.pathname + location.search + hash);
+  for (const b of $$(".view-tab, .tab-btn")) b.setAttribute("aria-current", b.dataset.view === view ? "page" : "false");
   for (const s of $$(".view")) {
     const on = s.dataset.view === view;
     s.hidden = !on;
     if (on && changed && !initial) { s.classList.remove("entering"); void s.offsetWidth; s.classList.add("entering"); }
   }
   ON_SHOW[view]?.();
+}
+
+/** 手机底部那条主导航：四个视图，与顶栏页签同一份 `app.view`。 */
+function mountTabbar() {
+  const names = { stage: "舞台", score: "总谱", ledger: "账簿", greenroom: "后台" };
+  swap($("#tabbar"), VIEWS.map((v) => h("button.tab-btn", {
+    type: "button", "data-view": v, "aria-current": app.view === v ? "page" : "false",
+    // 点已经亮着的那个 tab = 回到它自己的根屏（在调音台屏点「舞台」应当回会话，而不是原地不动）。
+    onclick: () => { if (v === "stage" && app.view === "stage") applyStageScreen("session", { push: false }); else go(v); },
+  }, h("span.tab-label", names[v]))));
 }
 
 function onStatus(s) {
@@ -181,7 +253,8 @@ function renderCueBtn() {
   const b = $("#cue-btn");
   b.hidden = n === 0;
   $("#cue-count").textContent = n;
-  document.title = (n ? `(${n}) ` : "") + "Cadenza · Lilara";
+  // ⚠️ 标签题（`document.title`）不在这里写：它有每秒一次的 tick 与任务数，归 `js/runstate.js`
+  // 的 `paintTitle` 一个写者管。两处各写一半会互相盖掉。
 }
 
 function jumpToCue() {
@@ -198,16 +271,16 @@ function renderStatus() {
   const active = rows.filter((r) => r.active).length;
   const i = app.core?.info;
   swap(sb,
-    h("span.sb-item", "Cadenza ", h("b", VERSION)),
-    h("span.sb-item", "核心 ", h("b", app.core?.base || "—")),
-    i ? h("span.sb-item", "v", h("b", i.coreVersion)) : null,
+    h("span.sb-item.sb-brand", "Cadenza ", h("b", VERSION)),
+    h("span.sb-item.sb-core", "核心 ", h("b", app.core?.base || "—")),
+    i ? h("span.sb-item.sb-ver", "v", h("b", i.coreVersion)) : null,
     // 只在核心说「要 token」时才占一格——默认不校验的核心上多一格就是噪音。
     i?.authRequired ? h("span.sb-item", "鉴权 ", h("b", app.core.token ? "已带" : "要 token")) : null,
     h("span.sb-item", "会话 ", h("b", fmtNum(rows.length)), " · 在内存 ", h("b", fmtNum(active)), " · 演奏中 ", h("b", fmtNum(running))),
     h("span.sb-item", "提供商 ", h("b", fmtNum(app.providers.length))),
     h("span.sp"),
-    i?.workingDirectory ? h("span.sb-item", { title: "核心的工作目录" }, "⌂ ", h("b", i.workingDirectory)) : null,
-    h("span.sb-item", "帧 ↓", h("b", fmtNum(app.core?.stats.in)), " ↑", h("b", fmtNum(app.core?.stats.out))));
+    i?.workingDirectory ? h("span.sb-item.sb-cwd", { title: "核心的工作目录" }, "⌂ ", h("b", i.workingDirectory)) : null,
+    h("span.sb-item.sb-frames", "帧 ↓", h("b", fmtNum(app.core?.stats.in)), " ↑", h("b", fmtNum(app.core?.stats.out))));
 }
 
 function keyboard() {

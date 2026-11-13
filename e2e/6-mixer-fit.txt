@@ -16,6 +16,9 @@ expect !/OVER/.test(window.__all())
 eval window.__all()
 size 1100 900
 wait 400
+# ≤1080 调音台是收起来的右侧抽屉（`display:none` 那套已经没了）：先拉开再量
+eval document.querySelector('.sh-mixer').click()
+wait 400
 expect !/OVER/.test(window.__all())
 eval window.__all()
 eval [...document.querySelectorAll('.mix-tab')].find(b => b.textContent === '模型').click()

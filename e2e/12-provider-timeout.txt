@@ -46,11 +46,16 @@ until window.__kv('调用超时') === '2 秒' ;; 6000
 
 goto http://127.0.0.1:17994/#stage
 until document.querySelector('#conn').dataset.state === 'open'
-until !!document.querySelector('.prog-row') ;; 8000
-eval window.__A = [...cadenza.sessions.keys()][0]; window.__row = (id) => [...document.querySelectorAll('.prog-row')].find(b => b.title.startsWith(id)); window.__say = (t) => { const i = document.querySelector('.composer-inp'); i.value = t; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; }; window.__A
+# ⚠️ **自己造一场**，不要拿 `[...cadenza.sessions.keys()][0]`：那一个是「数据根里最早的那场」，
+# 在整套 e2e 里它就是别的脚本留下的会话（10-goal 拨回 standard 之后还会再跑一回合、11-shell 的
+# 长命令刚被打断）⇒ 这里等「它闲着」会一直等不到，而红的理由看起来像超时没生效。
+eval (async () => { window.__A = (await cadenza.core.command({ kind: 'session.create', title: '超时探针' })).sessionId; return window.__A; })()
+until (window.__A || '').length > 8 ;; 15000
+eval window.__row = (id) => [...document.querySelectorAll('.prog-row')].find(b => b.title.startsWith(id)); window.__say = (t) => { const i = document.querySelector('.composer-inp'); i.value = t; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return 1; }; window.__A
+until !!window.__row(window.__A) ;; 8000
 eval window.__row(window.__A).click()
 until !!document.querySelector('.ax-initiative .seg-b') ;; 8000
-until !window.__row(window.__A).classList.contains('st-gen') ;; 5000
+until !window.__row(window.__A).classList.contains('st-gen') ;; 8000
 eval window.__say('slow please')
 # 2 秒就该被掐断一次 ⇒ retry.attempt 到来；附注里带上这一格的当前值。
 until !!document.querySelector('.note-retry') ;; 20000

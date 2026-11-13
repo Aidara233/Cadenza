@@ -157,7 +157,30 @@ svg.chart .failed .b-in { fill: var(--vermilion); }
   .lg-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .lg-grid, .preset-grid { grid-template-columns: 1fr; }
 }
+@media (max-width: 760px) {
+  /* 帧行五列在 390 宽度放不下（时间列最先没意义），收掉时间、把主题让出来 */
+  .fr { grid-template-columns: 34px 18px minmax(0, auto) minmax(0, 1fr); gap: 6px; padding: 7px 12px; }
+  .fr-t { display: none; }
+  .wire-h { flex-wrap: wrap; padding: 14px 16px 8px; }
+  .wire-h h2 { font-size: 20px; }
+  .wire-tools { flex-wrap: wrap; padding: 0 16px 10px; }
+  .wire-tools .inp { max-width: none; }
+  .console { padding: 0 14px 20px; }
+  /* 页头（账簿 / 后台）：标题占一行，页签另起一行并自己横滚——
+     不这么放，页签会把「后台」两个字挤成竖排，多出来的页签还顶出屏幕。 */
+  .lg-h { flex-wrap: wrap; gap: 8px 12px; }
+  .lg-h h2 { font-size: 22px; }
+  .lg-h > .seg { flex: 1 1 100%; overflow-x: auto; scrollbar-width: none; }
+  .lg-h > .seg::-webkit-scrollbar { height: 0; }
+  .lg-h > .seg .seg-b { flex: none; }
+}
 @media (max-width: 640px) {
   .lg-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ledger-in, .gr-in { padding: 16px; }
+  /* 卡片头在窄屏折行：标题一行、说明另起一行——否则说明被挤成一条缝或顶出卡片 */
+  .card-h { flex-wrap: wrap; row-gap: 2px; }
+  .card-h .dim { flex-basis: 100%; }
+  /* 键值行改成上下两行：右对齐 + 省略号在手机上等于「值看不见」 */
+  .kv-row { flex-direction: column; align-items: flex-start; gap: 1px; }
+  .kv-v { max-width: 100%; text-align: left; overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
 }

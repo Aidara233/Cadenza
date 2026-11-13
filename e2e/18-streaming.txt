@@ -43,6 +43,16 @@ eval (async () => { const ack = await cadenza.core.command({ kind: 'session.send
 until document.querySelectorAll('.msg.from-model').length >= 2 ;; 25000
 until !!document.querySelector('.toolcall[data-tool="ls"]') ;; 25000
 expect /"path"/.test(document.querySelector('.toolcall[data-tool="ls"]')?.textContent || '')
+# ⚠️ **结果比它那条模型消息先到**（核心 2026-11-05 起「跑完一条报一条」，而 `tool_use` 所在的
+# 模型消息在**步末**才落盘）。头必须按 `callId` 配对，不能把先到的结果画成一条「调用不在视野内」
+# 的孤儿——那会让结果看起来属于**上一条消息**，而真正那张卡永远停在「等结果…」。
+# （用户实测报的就是这个形状；实测于真核心 + 真 SSE 上游，所以这条其实与流式无关，只是同一个脚本里。）
+until document.querySelector('.toolcall[data-tool="ls"]').classList.contains('done') ;; 25000
+expect document.querySelectorAll('.msg.from-tool').length === 0
+expect document.querySelectorAll('.toolcall').length === 1
+expect !/调用不在视野内/.test(document.querySelector('.tl-list').textContent)
+# 「执行中」那行是**临时**的：模型消息一到就整块丢掉，不能留在树上（留一张就是两张卡）
+expect document.querySelectorAll('.msg.live').length === 0
 # 收尾：删掉探针会话，别把垃圾留在隔离数据根里
 eval (async () => { const ack = await cadenza.core.command({ kind: 'session.delete', sessionId: window.__sid }); cadenza.current = null; return ack.accepted; })()
 logs
