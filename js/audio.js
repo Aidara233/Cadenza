@@ -19,6 +19,28 @@ const subs = new Set();
 let actx = null, master = null, limiter = null;
 const lastAt = new Map();
 let lastAny = -1e9;
+// ⚠️ **AudioContext 只能在用户手势里创建**。`play()` 是 viz 收到提示事件时调的——那时候页面
+// 可能一次点击都还没有，于是 `new AudioContext()` 会把控制台刷成「The AudioContext was not
+// allowed to start」，而且建出来的那个还挂在 suspended 上（要等手势才肯出声）。
+// 所以这里先等一次手势：手势之前**根本不建**这个对象（反正也出不了声），手势之后建 + resume，
+// 之后每次手势都顺手续一次——标签页被切走、音频设备变了之后，它自己会回到 suspended。
+let gestureDone = false;
+
+function armGesture() {
+  if (typeof document === "undefined") return;
+  const opts = { capture: true, passive: true };
+  const first = () => {
+    gestureDone = true;
+    for (const t of ["pointerdown", "keydown", "touchend"]) document.removeEventListener(t, first, opts);
+    // 用户本来就开着声音（上一次的偏好）：这一刻把上下文建起来，它落在手势里，允许出声。
+    if (levels.on) context();
+  };
+  for (const t of ["pointerdown", "keydown", "touchend"]) document.addEventListener(t, first, opts);
+  // 之后每次手势都续一次：`resume()` 也只在手势里才肯成功。
+  const keep = () => { if (actx && actx.state === "suspended") actx.resume().catch(() => { }); };
+  for (const t of ["pointerdown", "keydown"]) document.addEventListener(t, keep, opts);
+}
+armGesture();
 
 function load() {
   const raw = store.get(KEY, false);
@@ -69,6 +91,8 @@ export function patchAudio(patch = {}) {
 
 function context() {
   if (!actx) {
+    // 手势之前不建：建了也是 suspended，还会在控制台留一条警告。见文件上面 `armGesture()`。
+    if (!gestureDone) return null;
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return null;
     try { actx = new AC(); } catch { return null; }
@@ -161,6 +185,7 @@ export function play(name, force = false) {
 
 /** 解锁 AudioContext（用户手势里调一次，确认浏览器肯出声）。 */
 export function unlock() {
+  gestureDone = true;                       // 调用点都在手势里（面板上的按钮）
   const ac = context();
   if (ac && ac.state === "suspended") ac.resume().catch(() => { });
   return !!ac;
