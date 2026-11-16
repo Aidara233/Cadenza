@@ -32,8 +32,10 @@ until !document.querySelector('dialog') ;; 6000
 expect window.__kv('调用超时') === '600 秒'
 
 # ⑤ 0 越界 ⇒ 核心拒，reason 原样显示，盘上没变
+# ⚠️ 等的是**那句话**，不是 `.form-err` 这个元素：对话框一打开它就在（空串），
+#    紧跟着的瞬时断言会抢在核心回执之前跑完（经反代多几毫秒就必输，实测）。
 eval window.__set('0')
-until !!document.querySelector('dialog .form-err') ;; 4000
+until /--timeout/.test(document.querySelector('dialog .form-err')?.textContent || '') ;; 4000
 expect /--timeout/.test(document.querySelector('dialog .form-err').textContent)
 eval window.__cancel()
 wait 300

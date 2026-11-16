@@ -1,6 +1,7 @@
 // Cadenza · model — global store over the core: sessions, projects, approvals, registries.
 import { Emitter, store, toast, fmtDur } from "./util.js";
 import { projectKeyOf } from "./core.js";
+import { mark, tag } from "./watchdog.js";
 
 export const app = {
   core: null,
@@ -139,6 +140,17 @@ export async function setShowArchived(on) {
 
 /** GET /sessions（+ 勾着时的 /sessions/archived）— 两个都不激活会话，可轮询。 */
 export async function refreshSessions() {
+  // ⚠️ **单飞**：15 秒那一轮、`scheduleRefresh`、事件后的补救会同时来（工具连发时尤其明显）。
+  // 几份 `/sessions` 叠着跑时，后到的那份不过比先到的旧一点，却会把行改回去——表现是
+  // 节目单/头部「一抖一抖地倒回去」，白烧的请求另算。同一时刻只跑一份，其余直接等它。
+  if (refreshing) return refreshing;
+  refreshing = refreshSessionsNow().finally(() => { refreshing = null; });
+  return refreshing;
+}
+let refreshing = null;
+
+async function refreshSessionsNow() {
+  tag("T:refresh");
   const started = Date.now();
   let rows, pks;
   try { [rows, pks] = await Promise.all([app.core.get("/sessions"), app.core.get("/projects")]); }
@@ -191,6 +203,7 @@ export async function refreshSessions() {
   syncSubscriptions();
   app.bus.emit("sessions");
   app.bus.emit("approvals");
+  tag("T:refresh:out");
 }
 
 // ---------------- subscriptions ----------------
@@ -238,6 +251,7 @@ export function resetSubscriptions() { subscribedProjects = new Set(); subscribe
  * 在核心改判据那天会静默分叉。旧核心不发这条时，才退回按 status 猜一个。
  */
 export function onGlobalEvent(p, topic) {
+  mark("evt:" + p.kind);
   const id = p.sessionId;
   const r = id ? app.sessions.get(id) : null;
   const touch = () => { if (r) r.liveAt = Date.now(); };
@@ -355,8 +369,8 @@ export function onGlobalEvent(p, topic) {
       asks = true;
       break;
   }
-  if (rows) { if (p.kind === "session.state" || p.kind === "session.step.begin") syncSubscriptions(); app.bus.emit("sessions"); }
-  if (asks) app.bus.emit("approvals");
+  if (rows) { if (p.kind === "session.state" || p.kind === "session.step.begin") syncSubscriptions(); app.bus.emit("sessions"); tag("E:sessions"); }
+  if (asks) { app.bus.emit("approvals"); tag("E:approvals"); }
 }
 
 function dropAsk(askId) { app.approvals.delete(askId); }

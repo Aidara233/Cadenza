@@ -63,7 +63,10 @@ wait 1200
 eval document.querySelector('.composer-stop').click()
 until !!document.querySelector('.note-interrupt') ;; 8000
 ;; 打断之后那张「执行中」不能继续挂着（那个进程已经不在了），而且**不能**变成两张卡
-expect !document.querySelector('.toolcall.running')
+;; ⚠️ 用 `until` 而不是紧跟着的 `expect`：中断那条注记与 `session.step.end` 是**两帧**，
+;;    判据是后者的收尾（`timeline.stepEnd` 里 clearRunning）。写成瞬时断言就是在赌
+;;    「两帧之间不超过一个轮询间隔」——经反代之后这条赌注会输（实测）。
+until !document.querySelector('.toolcall.running') ;; 5000
 wait 5000
 expect !window.__row(window.__B).classList.contains('st-gen')
 ;; 也不能冒出一张「调用不在视野内」的孤儿：被打断那条调用的结果若先到过，它要么随模型消息

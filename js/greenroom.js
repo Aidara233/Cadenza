@@ -397,15 +397,19 @@ async function shell(root) {
 async function system(root) {
   await loadRegistries();
   const i = app.info || {}, hl = app.health || {};
+  const head = app.core.via === "head";
+  const headOwned = app.core.authOwner === "head";
   // ⚠️ 判据是**模式匹配**（核心默认 `http://*:<头端口>`）：逐字相等会把正确配置判成「不吻合」，
   // 而那正是让人去改一个本来正确的设置的最短路径。
-  const originOk = !i.allowedOrigin || originMatches(i.allowedOrigin, location.origin);
+  // ⚠️ 代理模式下**这一格整个不适用**：握手是 Cadenza 的进程发的，它不带 `Origin`
+  // （核心对无 Origin 的客户端一律放行）——页面的 origin 根本到不了核心。
+  const originOk = head || !i.allowedOrigin || originMatches(i.allowedOrigin, location.origin);
   const originWild = (i.allowedOrigin || "").includes("*") && i.allowedOrigin !== "*";
-  const coreInp = h("input.inp.mono", { value: app.core.base, "aria-label": "核心地址" });
+  const coreInp = h("input.inp.mono", { value: app.core.base || app.core.displayUrl, "aria-label": "核心地址" });
   const tokenInp = h("input.inp.mono", {
     type: "text", autocomplete: "off", spellcheck: "false",
-    value: app.core.token, placeholder: app.core.token ? "" : "未填（核心开了鉴权才需要）",
-    "aria-label": "访问 token",
+    value: headOwned ? "" : app.core.token, placeholder: app.core.token ? "" : "未填（核心开了鉴权才需要）",
+    "aria-label": "访问 token", disabled: headOwned,
   });
   const saveToken = () => {
     app.core.setToken(tokenInp.value.trim());
@@ -422,45 +426,84 @@ async function system(root) {
         kvr("工作目录", h("code", i.workingDirectory || (i.authRequired ? "（未授权，核心不交）" : "—"))),
         kvr("鉴权", i.authRequired
           ? h("span", h("span.chip.green", "开"),
-            app.core.token ? h("span.dim", " 已带 token") : h("span.dim", " 这个页面还没带 token"))
+            headOwned ? h("span.dim", " 由 Cadenza 进程代持") : app.core.token ? h("span.dim", " 已带 token") : h("span.dim", " 这个页面还没带 token"))
           : h("span.dim", "关（默认放行：能连上这个端口的人都能驱动核心）")),
         kvr("内存里的会话", h("span.num", fmtNum(hl.sessions))),
         // ⚠️ 这两行印的是**这个页面实际在用的地址**，不是 `/info.endpoints`：核心默认绑 0.0.0.0 之后
         // 它交出来的就是 `http://0.0.0.0:17989`，而 `0.0.0.0` 不是一个能连的地址——印它只会让
         // 人拿一个连不上的 URL 去排错。
-        kvr("HTTP", h("code", app.core.base)),
-        kvr("WS", h("code", app.core.wsUrl.replace(/\?token=.*$/, ""))),
+        kvr("连接", head
+          ? h("span", h("span.chip.green", "经 Cadenza 进程"), h("span.dim", " 页面只跟头的源说话，头再转发给上游"))
+          : h("span.dim", "页面直连核心（`?core=` 或没有 /config.json 时的形态）")),
+        kvr("页面在打", h("code", app.core.displayUrl)),
+        kvr("上游", h("code", app.core.upstreamUrl)),
+        // 直连时把查询参数里的 token 打码；代理模式下页面这条 URL 本来就不带凭据。
+        kvr("WS", h("code", head ? app.core.wsUrl : app.core.wsUrl.replace(/\?token=.*$/, "?token=…"))),
         kvr("帧统计", h("span.num", `收 ${app.core.stats.in} · 发 ${app.core.stats.out}`)))),
     h("section.card",
       h("div.card-h", h("h3", "访问 token"), h("span.sp"),
-        i.authRequired ? h("span.chip.green", "核心在校验") : h("span.chip", "核心不校验")),
-      h("p.dim", "核心设了 ", h("code", "LILARA_AUTH=1"),
-        " 才校验。token 每次启动重新生成，打印在核心的控制台启动横幅里（", h("code", "访问 token …"), " 那一行）。"),
-      h("div.row", tokenInp, h("button.btn.btn-sm", { type: "button", onclick: saveToken }, "保存并重载"),
-        h("button.btn.btn-sm.btn-ghost", { type: "button", onclick: () => { tokenInp.value = ""; saveToken(); } }, "清除")),
-      h("p.dim.mt", "两种交法都是核心定的：HTTP 走 ", h("code", "Authorization: Bearer"), "，"
-        + "WebSocket 走 ", h("code", "?token="), "（浏览器的 WebSocket 不能自定义请求头）。"
-        + "图片这类 ", h("code", "<img src>"), " 只能走查询参数。"),
-      h("p.dim", "⚠️ 控制面是明文 HTTP：token 拦得住随手连上来的人，挡不住同一网段里的嗅探者。")),
+        headOwned
+          ? h("span.chip.green", "由进程代持")
+          : i.authRequired ? h("span.chip.green", "核心在校验") : h("span.chip", "核心不校验")),
+      headOwned
+        ? h("div",
+          h("p.dim", "这份 token 由 ", h("b", "Cadenza 的进程"), " 交（", h("code", "-Token"),
+            " 或环境变量 ", h("code", "LILARA_CORE_TOKEN"), "），浏览器与 localStorage 都不经手——"
+            + "所以这里没有可填的框。"),
+          h("p.dim.mt", "核心每次启动都会换一个新的：把启动横幅里那一行（", h("code", "访问 token …"),
+            "）交给头，然后重启 Cadenza。"),
+          h("p.dim", "⚠️ 控制面是明文 HTTP：token 拦得住随手连上来的人，挡不住同一网段里的嗅探者。"))
+        : h("div",
+          h("p.dim", "核心设了 ", h("code", "LILARA_AUTH=1"),
+            " 才校验。token 每次启动重新生成，打印在核心的控制台启动横幅里（", h("code", "访问 token …"), " 那一行）。"),
+          h("div.row", tokenInp, h("button.btn.btn-sm", { type: "button", onclick: saveToken }, "保存并重载"),
+            h("button.btn.btn-sm.btn-ghost", { type: "button", onclick: () => { tokenInp.value = ""; saveToken(); } }, "清除")),
+          head ? h("p.dim.mt", "代理模式下更好的做法是让**头**持有它（", h("code", "-Token <token>"),
+            "）：那样 token 不进浏览器，也不用在每台设备上填一遍。") : null,
+          h("p.dim.mt", "两种交法都是核心定的：HTTP 走 ", h("code", "Authorization: Bearer"), "，"
+            + "WebSocket 走 ", h("code", "?token="), "（浏览器的 WebSocket 不能自定义请求头）。"
+            + "图片这类 ", h("code", "<img src>"), " 只能走查询参数。"),
+          h("p.dim", "⚠️ 控制面是明文 HTTP：token 拦得住随手连上来的人，挡不住同一网段里的嗅探者。"))),
     h("section.card" + (originOk ? "" : ".card-bad"),
-      h("div.card-h", h("h3", "WS 白名单"), h("span.sp"), originOk ? h("span.chip.green", "吻合") : h("span.chip.red", "不吻合")),
-      h("div.kv",
-        kvr("核心放行", h("code", i.allowedOrigin || "—")),
-        kvr("含义", h("span.dim", i.allowedOrigin ? describeOrigin(i.allowedOrigin) : "—")),
-        kvr("本页 origin", h("code", location.origin))),
-      originOk ? h("p.dim.mt", "浏览器握手会被核心接受。") : h("div.mt",
-        h("p", "核心会静默拒绝本页的 WS 握手（浏览器拿不到 403 的原因）。两条路："),
-        h("ol",
-          originWild
-            ? h("li", "换个端口打开本页：核心只认端口 ", h("code", (i.allowedOrigin || "").split(":").pop()),
-              "，主机名/地址随便（局域网 IP、localhost 都行）")
-            : h("li", "用 ", h("code", i.allowedOrigin), " 打开本页（注意 localhost ≠ 127.0.0.1）"),
-          h("li", "或让核心放行本页：设 ", h("code", "LILARA_ALLOWED_ORIGIN=" + location.origin), " 后重启核心")))),
+      h("div.card-h", h("h3", "WS 白名单"), h("span.sp"),
+        head ? h("span.chip.green", "不适用") : originOk ? h("span.chip.green", "吻合") : h("span.chip.red", "不吻合")),
+      head
+        ? h("div",
+          h("div.kv",
+            kvr("核心放行", h("code", i.allowedOrigin || "—")),
+            kvr("含义", h("span.dim", i.allowedOrigin ? describeOrigin(i.allowedOrigin) : "—")),
+            kvr("握手方", h("span", h("span.chip.green", "Cadenza 进程"), h("span.dim", " 不带 Origin"))),
+            kvr("本页 origin", h("code", location.origin))),
+          h("p.dim.mt", "核心只对**浏览器**的握手较这个真（带 `Origin` 就要求落在白名单里；"
+            + "不带就一律放行）。页面这边握手的人是 Cadenza 的进程，所以本页从哪个地址打开都行——"
+            + "端口换了、走隧道、上 https 都不用再动核心的 ", h("code", "LILARA_ALLOWED_ORIGIN"), "。"))
+        : h("div",
+          h("div.kv",
+            kvr("核心放行", h("code", i.allowedOrigin || "—")),
+            kvr("含义", h("span.dim", i.allowedOrigin ? describeOrigin(i.allowedOrigin) : "—")),
+            kvr("本页 origin", h("code", location.origin))),
+          originOk ? h("p.dim.mt", "浏览器握手会被核心接受。") : h("div.mt",
+            h("p", "核心会静默拒绝本页的 WS 握手（浏览器拿不到 403 的原因）。两条路："),
+            h("ol",
+              originWild
+                ? h("li", "换个端口打开本页：核心只认端口 ", h("code", (i.allowedOrigin || "").split(":").pop()),
+                  "，主机名/地址随便（局域网 IP、localhost 都行）")
+                : h("li", "用 ", h("code", i.allowedOrigin), " 打开本页（注意 localhost ≠ 127.0.0.1）"),
+              h("li", "或让核心放行本页：设 ", h("code", "LILARA_ALLOWED_ORIGIN=" + location.origin), " 后重启核心"))))),
     h("section.card",
       h("div.card-h", h("h3", "核心地址")),
-      h("p.dim", "页面直连核心，不代理。也可以用 ", h("code", "?core=http://…"), " 打开。"),
-      h("div.row", coreInp, h("button.btn.btn-sm", { type: "button", onclick: () => { store.set("core", coreInp.value.trim().replace(/\/+$/, "")); location.reload(); } }, "换并重连")),
-      h("button.btn.btn-sm.btn-ghost.mt", { type: "button", onclick: () => { store.del("core"); location.reload(); } }, "恢复默认")),
+      h("p.dim",
+        // ⚠️ 三元的两支各自包在自己的 `h("span", …)` 里：把 `h(...)` 直接混进 `? … : …` 的
+        // 字符串拼接里，逗号会被当成**外层 h() 的参数分隔符**，三元就断了（实测过的坑）。
+        head
+          ? h("span", "页面不再直连核心：它只认本页的源，", h("code", "/core/*"), " 由 Cadenza 的进程转给上游。"
+            + "换上游要给**进程**（重启时 ", h("code", "-Core http://…"), " / 环境变量 ", h("code", "LILARA_CORE"), "）。")
+          : h("span", "页面直连核心，不代理。也可以用 ", h("code", "?core=http://…"), " 打开。")),
+      head ? null : h("div.row", coreInp, h("button.btn.btn-sm", { type: "button", onclick: () => { store.set("core", coreInp.value.trim().replace(/\/+$/, "")); location.reload(); } }, "换并重连")),
+      head
+        ? h("div.row", h("button.btn.btn-sm.btn-ghost", { type: "button", onclick: () => { store.del("core"); location.reload(); } }, "恢复（继续经进程）"),
+          h("button.btn.btn-sm.btn-ghost", { type: "button", onclick: () => { store.set("core", app.core.upstreamUrl); location.reload(); } }, "改成页面直连（调试）"))
+        : h("button.btn.btn-sm.btn-ghost.mt", { type: "button", onclick: () => { store.del("core"); location.reload(); } }, "恢复默认")),
     h("section.card",
       h("div.card-h", h("h3", "行为轴注册表"), h("span.dim", "/axes")),
       h("div.axes-reg", ...(app.axes?.axes || []).map((a) => h("div.ar", h("b", a.label), h("code.dim", a.name), h("div.ar-v", ...a.values.slice(0, 8).map((v) => h("span.chip.mono", v)), a.values.length > 8 ? h("span.dim", ` … 共 ${a.values.length} 档`) : null)))),

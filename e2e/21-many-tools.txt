@@ -1,0 +1,55 @@
+# 21-many-tools: 一步里 **N 条工具调用**——工具相位不许把主线程按住（用户报的「页面直接卡死」）。
+#
+# 判据是**主线程长帧**，不是「卡有没有出来」：requestAnimationFrame 的相邻间隔就是「这期间页面
+# 一帧都画不出来」的长度。一条 3 秒的长帧 = 页面卡死 3 秒（用户在这 3 秒里点什么都没反应）。
+# ⚠️ 用真核心 + 真 SSE 上游（mock 的「一堆工具 N」）。假数据测不出这条链：核心的顺序执行、
+# 「跑完一条报一条」、以及头按 `callId` 配对，三样都得在真的。
+#
+# 三处要一起看：
+#   ① `until .toolcall.running` —— 调用一开始就看得见（不是跑完才出现）；
+#   ② `done` 计数 —— N 条结果全配上了（没有一条掉在孤儿区）；
+#   ③ `maxGap` —— 最坏那一帧有多长。它才是本脚本的主题。
+goto http://127.0.0.1:17994/?core=http://127.0.0.1:17989
+until !!window.cadenza && document.querySelector('#conn').dataset.state === 'open' ;; 15000
+logs
+
+# 提供商：**开流式**（一次发 N 条时上游是 N 个 index 各出分片，这条路径最容易悄悄退化成一条）
+eval (async () => { const ack = await cadenza.core.command({ kind: 'provider.upsert', id: 'mock', apiKey: 'sk-test', model: 'mock-flash', protocol: 'openai-chat', endpoint: 'http://127.0.0.1:15799', streaming: true }); await (await import('./js/model.js')).loadRegistries(); return ack.accepted + ':' + (ack.reason || ''); })()
+wait 300
+
+# 长帧探针：每帧记一次间隔（跑完再看最坏那一帧）。⚠️ 必须**在发消息之前**起。
+eval (() => { window.__gaps = []; let last = performance.now(); const step = () => { const n = performance.now(); window.__gaps.push(n - last); last = n; requestAnimationFrame(step); }; requestAnimationFrame(step); return 1; })()
+eval (() => { window.__t0 = 0; return 1; })()
+
+# 一场干净的会话：permission=trusted（`read` 本来就放行，这里只是别让闸门掺进来）
+eval (async () => { const ack = await cadenza.core.command({ kind: 'session.create', title: '一堆工具' }); window.__sid = ack.sessionId || ''; await cadenza.core.command({ kind: 'session.setAxis', sessionId: window.__sid, axis: 'permission', value: 'trusted' }); return ack.accepted + ':' + window.__sid; })()
+until (window.__sid || '').length > 8 ;; 15000
+eval (async () => { const { setCurrent } = await import('./js/model.js'); setCurrent(window.__sid); return 1; })()
+until !!document.querySelector('.composer-inp') ;; 10000
+
+# 发：「一堆工具 40」→ 上游回**一条** assistant 消息，里面 40 条 tool_calls
+eval (async () => { window.__t0 = performance.now(); const ack = await cadenza.core.command({ kind: 'session.send', sessionId: window.__sid, blocks: [{ kind: 'text', text: '一堆工具 40' }] }); return ack.accepted; })()
+# ⚠️ **这里不断言「执行中」那行一定看得见**：`read` 一条只要几毫秒，40 条的「执行中」相位
+# 可能短过一次 150ms 的轮询窗口（实测 40 条时常常一次都抓不到，300 条时抓得到）。
+# 那张临时行是另一个脚本（11-shell，长命令）证的东西，这里只关心条数与长帧。
+# ② 40 张 `read` 卡都出来了
+until document.querySelectorAll('.toolcall[data-tool="read"]').length >= 40 ;; 120000
+eval Math.round(performance.now() - window.__t0)
+# ③ 40 条结果都配上了（`.done` 由 attachResult 打）
+until document.querySelectorAll('.toolcall[data-tool="read"].done').length >= 40 ;; 120000
+eval Math.round(performance.now() - window.__t0)
+
+# 结论：条数、孤儿、最坏长帧
+eval (() => { const g = window.__gaps || []; const s = [...g].sort((a, b) => a - b); return JSON.stringify({ cards: document.querySelectorAll('.toolcall[data-tool="read"]').length, done: document.querySelectorAll('.toolcall[data-tool="read"].done').length, orphans: document.querySelectorAll('.msg.from-tool').length, frames: g.length, maxGap: Math.round(Math.max(0, ...g)), p95: Math.round(s[Math.floor(s.length * 0.95)] || 0), over100ms: g.filter((x) => x > 100).length, elapsed: Math.round(performance.now() - window.__t0) }); })()
+expect document.querySelectorAll('.toolcall[data-tool="read"]').length === 40
+expect document.querySelectorAll('.toolcall[data-tool="read"].done').length === 40
+expect document.querySelectorAll('.msg.from-tool').length === 0
+expect !/调用不在视野内/.test(document.querySelector('.tl-list').textContent)
+# ⚠️ 这一条是**长帧**的判据：一帧超过 1500ms 就是「用户点什么都得等 1.5 秒」。
+expect Math.max(0, ...window.__gaps) < 1500
+shot 21-many-tools
+
+# 会话真的停了下来（没有卡在「执行中」）
+until !window.__row?.(window.__sid)?.classList.contains('st-gen') ;; 30000
+eval (async () => { const ack = await cadenza.core.command({ kind: 'session.delete', sessionId: window.__sid }); cadenza.current = null; return ack.accepted; })()
+logs

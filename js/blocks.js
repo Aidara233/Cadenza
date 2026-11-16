@@ -1,7 +1,7 @@
 // Cadenza · blocks — render Block[] (text / reasoning / toolUse / image / store).
 import { h, prettyJson, highlightJson, esc } from "./util.js";
 import { md } from "./md.js";
-import { coreToken, TOKEN_PARAM } from "./core.js";
+import { coreToken, coreUrl, coreAuthOwner, TOKEN_PARAM } from "./core.js";
 
 const TOOL_GLYPH = {
   read: "◎", ls: "☰", search: "⌕", write: "✎", update: "✎", delete: "✕", mkdir: "▣", path: "⌖",
@@ -20,8 +20,32 @@ const TOOL_GLYPH = {
 };
 export const toolGlyph = (name) => TOOL_GLYPH[name] || "◆";
 
+// 一条正文里**排版**多少字。超出的部分按原文放进 `<pre class="out">`（滚动框、原文照列、
+// `Ctrl+F` 与「复制这条」都还是全文）——只省掉「给几 MB 跑 markdown + 铺成几 MB 的文字流」。
+// ⚠️ 实测：`md()` 2.5 MB 要 675ms，而一条几十 MB 的消息在真会话里是有的（模型把整个文件吐出来）。
+const MD_MAX = 128 * 1024;
+
+/** 正文 → 节点。长文分两段：前 128 KB 排版，其余原文照列（再长就只画前 `RAW_MAX`）。 */
+function textNodes(text) {
+  const s = String(text ?? "");
+  if (s.length <= MD_MAX) return [h("div.md", { html: md(s) })];
+  let cut = s.lastIndexOf("\n", MD_MAX);
+  if (cut < MD_MAX * 0.5) cut = MD_MAX;
+  const rest = s.slice(cut);
+  // ⚠️ 剩下的那一段**也必须有上限**：它是一个文本节点，进了视口就要按字数付布局的钱。
+  // 2026-11-15 的记录里有一次 25 秒的停摆，DOM 只有 5959 个节点、堆 9 MB —— 数量解释不了，
+  // 能解释的就是「某一个节点特别大」。全文仍在消息块里（「复制这条」拿的是全文）。
+  const shown = rest.length > RAW_MAX ? rest.slice(0, RAW_MAX) : rest;
+  return [
+    h("div.md", { html: md(s.slice(0, cut)) }),
+    h("div.md-more.dim", `还有 ${Math.round(rest.length / 1024)} KB · 下面按原文列出，不排版（复制与查找仍是全文）`),
+    h("pre.out.md-rest", shown),
+    rest.length > RAW_MAX ? moreNote(rest.length, RAW_MAX, "落盘的消息里是全文") : null,
+  ];
+}
+
 export function textBlock(text) {
-  return h("div.md", { html: md(text) });
+  return h("div", ...textNodes(text));
 }
 
 export function reasoningBlock(b) {
@@ -31,7 +55,7 @@ export function reasoningBlock(b) {
   const len = (b.text || "").length;
   const d = h("details.reasoning",
     h("summary", h("span.r-label", "思考"), h("span.r-meta", `${len} 字`)),
-    h("div.r-body.md", { html: md(b.text || "") }));
+    h("div.r-body", ...textNodes(b.text || "")));
   return d;
 }
 
@@ -82,8 +106,7 @@ function argSummary(name, a) {
 }
 
 /** A tool call card. Result slot is filled later by attachResult(). */
-export function toolUseBlock(b, opts = {}) {
-  const a = argsOf(b.arguments);
+export function toolUseBlock(b, opts = {}) {  const a = argsOf(b.arguments);
   const summary = argSummary(b.name, a);
   const body = h("div.tc-body");
   if (b.name === "write" && a && typeof a.content === "string") {
@@ -124,6 +147,19 @@ export function attachResult(card, result, opts = {}) {
     resultView(result.blocks, text, opts, card));
 }
 
+// 一张卡里**画**多少字的上限。⚠️ 不是为了好看：几 MB 的文本节点会让每次布局都变贵，而
+// 时间线里 `.tl-list > li` 的 `content-visibility` 只救得了**滚出视口**的那些——
+// 刚来的这一条正在视口里。超出的部分明说「没画出来」，全文仍在消息块里（「复制这条」拿的是全文）。
+const OUT_MAX = 256 * 1024;
+const JSON_MAX = 128 * 1024;
+const CODE_MAX = 128 * 1024;
+const RAW_MAX = 256 * 1024;
+
+function moreNote(total, shown, what) {
+  return h("div.tc-more.dim",
+    `还有 ${Math.round((total - shown) / 1024)} KB 没画出来（${what}）`);
+}
+
 /**
  * 后台任务的结果里带 `job-…` 时，给一条**就地跳过去**的路。
  * ⚠️ 只认结果文本里那个 id，不猜「这张卡是不是关于任务的」：`shell` 前台的结果里也可能
@@ -135,7 +171,11 @@ const JOB_ID_RE = /\bjob-[0-9a-f]{6,}\b/;
 function resultView(blocks, text, opts = {}, card = null) {
   const nonText = (blocks || []).filter((b) => b.kind !== "text");
   const wrap = h("div.tc-out");
-  if (text) wrap.append(h("pre.out", text));
+  if (text) {
+    if (text.length > OUT_MAX) {
+      wrap.append(h("pre.out", text.slice(0, OUT_MAX)), moreNote(text.length, OUT_MAX, "「复制这条」与历史里都是全文"));
+    } else wrap.append(h("pre.out", text));
+  }
   for (const b of nonText) wrap.append(renderBlock(b));
   const jobId = opts.onJob ? JOB_ID_RE.exec(text)?.[0] : null;
   if (jobId) {
@@ -152,31 +192,42 @@ export function blocksToText(blocks) {
 }
 
 function jsonPre(raw) {
-  return h("pre.json", { html: highlightJson(prettyJson(raw)) });
+  // ⚠️ `tool.call.started` 那条路上的 `arguments` 是**对象**（核心那边已经解过一次），
+  // 只有落盘消息里的是原文字符串。两种都要能画——`String(对象)` 会得到 `[object Object]`。
+  const s = typeof raw === "string" ? raw
+    : (() => { try { return JSON.stringify(raw, null, 2); } catch { return String(raw ?? ""); } })();
+  if (s.length <= JSON_MAX) return h("pre.json", { html: highlightJson(prettyJson(s)) });
+  // 截断的 JSON 一定 parse 不了 ⇒ `prettyJson` 原样返回；照样高亮，省掉的是排版那一遍。
+  return h("div",
+    h("pre.json", { html: highlightJson(s.slice(0, JSON_MAX)) }),
+    moreNote(s.length, JSON_MAX, "参数原文只在「批准 / 改写参数」那张卡里给全文"));
 }
 
 function codeView(content, path) {
   const ext = /\.([\w]+)$/.exec(path || "")?.[1] || "text";
-  return h("figure.code", h("figcaption", h("span", ext)), h("pre", h("code", content)));
+  const s = String(content ?? "");
+  const pre = s.length > CODE_MAX
+    ? h("pre", h("code", s.slice(0, CODE_MAX)))
+    : h("pre", h("code", s));
+  return h("figure.code", h("figcaption", h("span", ext)), pre,
+    s.length > CODE_MAX ? moreNote(s.length, CODE_MAX, "落盘的内容是完整的") : null);
 }
 
 // ---- 库的两个端点（核心 2026-10-29 那批） ----
 //
 // ⚠️ 图片块的记录里**只有地址**（`ImageBlock(sha256, mediaType)`），字节住核心的库里，
 // 要按 `GET /store/{sha256}` 去取（`03` §9.4）。⇒ 这里必须知道核心在哪。
-// ⚠️ 这里**只存一个字符串**，由 `app.js` 解析完核心地址之后塞进来：让 `blocks.js`
-// 去 import `app.js` 会绕出一条 app → stage → blocks 的循环。
-let coreBase = "";
-
-/** 核心地址（不带尾斜杠）。`app.js` 在 boot 时调一次。 */
-export function setCoreBase(base) { coreBase = (base || "").replace(/\/+$/, ""); }
-
+// ⚠️ 地址的拼法**不在这里**：`core.js` 的 `coreUrl()` 是唯一的出口（代理模式下它是同源的
+// `/core/store/…`，直连模式下是核心的绝对地址）。写死 `base + path` 的那一处，会在代理模式里
+// 把请求打到头自己身上（404），而症状看起来像「图片被回收了」。
+//
 // ⚠️ **图片与库链接只能走查询参数带 token**：`<img src>` / `<a href>` 都没法自定义请求头
 //（核心的 `IsAuthorized` 两种交法都认，就是为了这一格）。⇒ 这里读的是**当下**那份 token，
 // 不是 boot 时那一份——后台里换过 token 之后重新渲染出来的图，才该是能取回的。
+// ⚠️ 头自己带 token 时（`coreAuthOwner() === "head"`）**一个参数都不加**：凭据不进浏览器。
 const storeUrl = (sha) => {
-  const t = coreToken();
-  return `${coreBase}/store/${encodeURIComponent(sha || "")}`
+  const t = coreAuthOwner() === "page" ? coreToken() : "";
+  return coreUrl(`/store/${encodeURIComponent(sha || "")}`)
     + (t ? `?${TOKEN_PARAM}=${encodeURIComponent(t)}` : "");
 };
 
@@ -205,14 +256,14 @@ export function storeBlock(b) {
 
   // `store`：块数组 / 原始文本那种库对象——头**不解引用**（那是核心渲染期的事），
   // 只给一条能自己去看的路。
+  // ⚠️ 以前这里读一个**不存在的** `coreBase`：每一块 store 都在这里抛 ReferenceError，
+  // 被时间线接住画成「这一块渲染不了」。判据换成地址本身（拼法只在 `coreUrl()` 一处）。
   return h("div.objref",
     h("span.or-glyph", { "aria-hidden": "true" }, "▤"),
     h("div",
       h("div", "库对象", " · ", h("code", b.mediaType || "?")),
       h("div.dim.mono", (b.sha256 || "").slice(0, 24) + "…"),
-      coreBase
-        ? h("div.dim", h("a", { href: storeUrl(b.sha256), target: "_blank", rel: "noreferrer" }, "在核心的库里打开 ↗"))
-        : h("div.dim", "还没连上核心，取不到内容")));
+      h("div.dim", h("a", { href: storeUrl(b.sha256), target: "_blank", rel: "noreferrer" }, "在核心的库里打开 ↗"))));
 }
 
 export function renderBlock(b) {

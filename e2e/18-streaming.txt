@@ -53,6 +53,16 @@ expect document.querySelectorAll('.toolcall').length === 1
 expect !/调用不在视野内/.test(document.querySelector('.tl-list').textContent)
 # 「执行中」那行是**临时**的：模型消息一到就整块丢掉，不能留在树上（留一张就是两张卡）
 expect document.querySelectorAll('.msg.live').length === 0
+# ---- 长正文不许把主线程焊死（2026-11-15 实测过的那个「模型一说话页面就死」）----
+# 1) 临时气泡最多留 128 KB（`textContent +=` 的代价随长度超线性涨：1 MB 时一次追加 174ms，
+#    6 MB 时 1472ms；20 条/秒 ⇒ 永远画不完，刷新都排不上队）。这里灌 400×30 KB 走真 Timeline。
+eval (async () => { const { Timeline } = await import('./js/timeline.js'); const root = document.createElement('div'); const tl = new Timeline('probe', cadenza.core, root); for (let i = 0; i < 400; i++) tl.apply({ kind: 'term.delta', turn: 1, blockIndex: 0, deltaKind: 'text', text: 'y'.repeat(30000) }); await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))); const part = root.querySelector('.msg.live .msg-text'); window.__probe = { len: part?.textContent.length || 0, trim: !!root.querySelector('.live-trim') }; return 1; })()
+expect window.__probe.len > 0 && window.__probe.len <= 128 * 1024
+expect window.__probe.trim === true
+# 2) 落盘的超长正文只排版前 128 KB，其余按原文照列（`md()` 2.5 MB 要 675ms；全文仍在 pre 里）
+eval (async () => { const { textBlock } = await import('./js/blocks.js'); const big = 'z'.repeat(300000); const el = textBlock(big); window.__probe2 = { rest: el.querySelector('.md-rest')?.textContent.length || 0, note: !!el.querySelector('.md-more') }; return 1; })()
+expect window.__probe2.note === true
+expect window.__probe2.rest >= 300000 - 128 * 1024 - 2048
 # 收尾：删掉探针会话，别把垃圾留在隔离数据根里
 eval (async () => { const ack = await cadenza.core.command({ kind: 'session.delete', sessionId: window.__sid }); cadenza.current = null; return ack.accepted; })()
 logs

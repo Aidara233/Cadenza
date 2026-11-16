@@ -1,6 +1,7 @@
 // Cadenza · score — every WS frame as a bar of music, plus a console for all 19 commands.
 import { h, swap, clear, fmtTime, jsonBlock, copy, toast, store, debounce, confirmDlg } from "./util.js";
 import { app } from "./model.js";
+import { tag } from "./watchdog.js";
 
 const MAX = 2000;
 const W = { root: null, frames: [], paused: false, filter: [], dir: "all", list: null, detail: null, sel: null, counts: null, pendingRender: false };
@@ -60,15 +61,24 @@ export function mountScore(root) {
     h("div.wire-tools", search, dirSel, pause, h("button.btn.btn-sm.btn-ghost", { type: "button", onclick: () => { W.frames = []; W.sel = null; renderList(true); swap(W.detail); } }, "清空")),
     h("div.wire-body", W.list, W.detail));
   root.replaceChildren(left, consolePanel());
-  app.core.on("frame", onFrame);
+  // `?noscore=1`：总谱视图不订阅 WS 帧（面板照常，只是不逐帧更新）。
+  // 它是**每条帧**都要走一遍的第二个消费者（第一个是 viz），两个合起来就是「每帧的主线程开销」。
+  if (!new URLSearchParams(location.search).has("noscore")) app.core.on("frame", onFrame);
   renderList(true);
 }
-
 function onFrame(dir, f, at) {
   W.frames.push({ dir, f, at, n: W.frames.length ? W.frames[W.frames.length - 1].n + 1 : 1 });
   if (W.frames.length > MAX) W.frames.splice(0, W.frames.length - MAX);
-  if (W.paused || !W.root || W.root.hidden || W.root.closest("[hidden]")) { updateCounts(); return; }
-  if (!W.pendingRender) { W.pendingRender = true; requestAnimationFrame(() => { W.pendingRender = false; renderList(false); }); }
+  if (W.paused || !W.root || W.root.hidden || W.root.closest("[hidden]")) { scheduleCounts(); return; }
+  if (!W.pendingRender) { W.pendingRender = true; requestAnimationFrame(() => { W.pendingRender = false; tag("R:frames"); renderList(false); }); }
+}
+
+// ⚠️ 总谱没开着的时候，每一帧都去改一次计数文本是没有意义的写入：流式期间一秒钟几十上百帧，
+// 每一帧都让那块文本失效一次（样式 + 布局）。攒到 250ms 写一次，数字照样跟得上。
+let countsT = 0;
+function scheduleCounts() {
+  if (countsT) return;
+  countsT = setTimeout(() => { countsT = 0; tag("T:counts"); updateCounts(); tag("T:counts:out"); }, 250);
 }
 
 export function scoreShown() { renderList(true); }

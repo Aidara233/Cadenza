@@ -1,5 +1,5 @@
 // Cadenza · approvals — the "cue card": permission and question asks, all four item shapes.
-import { h, fmtCountdown, prettyJson, toast } from "./util.js";
+import { h, uid, store, fmtCountdown, prettyJson, toast } from "./util.js";
 import { app, cmd, titleOf, markLocal, scheduleRefresh } from "./model.js";
 import { md } from "./md.js";
 
@@ -20,6 +20,8 @@ export async function hydrate(a) {
   return a;
 }
 
+const foldTitle = (folded) => (folded ? "展开这张卡（问题 / 参数原文）" : "收起这张卡，留出地方读上面的回答");
+
 /**
  * Build a cue card. opts.compact = list mode (Stage sidebar); opts.onDone after resolved.
  */
@@ -37,15 +39,50 @@ export function cueCard(a, opts = {}) {
     }, 1000);
   }
 
+  // 折叠：卡里最长的是问题本身与参数原文（verbatim 能到十四行），摊开时会把总谱挤下去，
+  // 「先读模型刚说了什么，再回答」就做不成了。收起只藏 `.cue-body`——**答复按钮留在外面**，
+  // 批准 / 拒绝不需要读参数也能点；提问卡收起时要交答案则见 `send()` 里的那道闸。
+  // 偏好按 kind 各记一份（授权卡收起了，不该连下一张提问卡也一起藏起来）。
+  const foldKey = isPerm ? "permission" : "question";
+  const foldPrefs = () => {
+    const v = store.get("collapsedCues", {});
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  };
+  let folded = foldPrefs()[foldKey] === true;
+  const bodyId = uid("cue-body-");
+  const caret = h("span.cue-fold-caret", { "aria-hidden": "true" }, folded ? "▸" : "▾");
+  const foldLbl = h("span.cue-fold-lbl", folded ? "展开" : "收起");
+  const fold = h("button.cue-fold", {
+    type: "button", "aria-controls": bodyId, "aria-expanded": String(!folded),
+    title: foldTitle(folded),
+    onclick: () => setFold(!folded),
+  }, caret, foldLbl);
+  // 只摆状态、不写偏好：偏好只在人点的时候改（重画一张卡不该替人做决定）。
+  function setFold(next, remember = true) {
+    folded = next;
+    card.classList.toggle("collapsed", folded);
+    caret.textContent = folded ? "▸" : "▾";
+    foldLbl.textContent = folded ? "展开" : "收起";
+    fold.setAttribute("aria-expanded", String(!folded));
+    fold.title = foldTitle(folded);
+    if (!remember) return;
+    const prefs = foldPrefs();
+    prefs[foldKey] = folded;
+    store.set("collapsedCues", prefs);
+  }
+
   card.append(h("header.cue-h",
     h("span.cue-mark", { "aria-hidden": "true" }, isPerm ? "𝄐" : "?"),
     h("div.cue-title",
       h("div.eyebrow", isPerm ? "等你的手势 · 授权" : "等你的回答 · 提问"),
       h("div.cue-who", opts.showSession ? titleOf(a.sessionId) + " · " : "", isPerm ? h("code", a.toolName || "工具调用") : `${(a.items || []).length || "?"} 个问题`)),
-    timer));
+    timer,
+    fold));
 
   const body = h("div.cue-body");
+  body.id = bodyId;
   card.append(body);
+  setFold(folded, false);
 
   // 过期询问：核心在「重启 / 上一步被杀」之后不会主动补一条答复 —— 只有**下一次推进**
   // 才会收尾（`Recovery.BeforeStep`）。不催的话，这张卡会一直挂着，看起来像会话卡在「等你」。
@@ -106,6 +143,14 @@ export function cueCard(a, opts = {}) {
   let busy = false;
   async function send(outcome, decision, reason) {
     if (busy) return;
+    // 收起时「交出答案」只会发出一个空答案（选项 / 文本框都看不见）。不静默发、也不假装发了：
+    // 展开这张卡，让人自己作答。授权卡不设这道闸——批准 / 拒绝本来就不需要读正文。
+    if (!isPerm && outcome === "submit" && folded) {
+      setFold(false);
+      card.querySelector("input,textarea")?.focus({ preventScroll: true });
+      toast("先把这张卡展开，再作答", "warn");
+      return;
+    }
     busy = true;
     card.classList.add("sending");
     const answers = { ...state.answers };

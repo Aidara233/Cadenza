@@ -61,6 +61,15 @@ expect !!document.querySelector('.cue-verbatim')
 expect document.querySelectorAll('.cue-remember input').length === 3
 expect document.querySelector('.prog-row').classList.contains('st-wait')
 shot 07-perm-ask
+# 授权卡也能收起：只留卡头与答复按钮（批准 / 拒绝不需要读参数），腾出地方看模型说了什么
+eval document.querySelector('.cue-perm .cue-fold').click()
+until document.querySelector('.cue-perm').classList.contains('collapsed') ;; 2000
+expect getComputedStyle(document.querySelector('.cue-perm .cue-body')).display === 'none'
+expect document.querySelector('.cue-perm .btn-ok').offsetParent !== null
+expect document.querySelector('.cue-perm .cue-verbatim') === null || document.querySelector('.cue-perm .cue-verbatim').offsetParent === null
+shot 07b-perm-folded
+eval document.querySelector('.cue-perm .cue-fold').click()
+until !document.querySelector('.cue-perm').classList.contains('collapsed') ;; 2000
 # edit arguments then approve
 eval (() => { const ta = document.querySelector('.cue-verbatim'); ta.value = JSON.stringify({ path: 'cadenza-demo.txt', content: 'edited by cadenza\n' }); ta.dispatchEvent(new Event('input')); return document.querySelector('.vb-status').textContent; })()
 expect !document.querySelector('.cue-modify').hidden

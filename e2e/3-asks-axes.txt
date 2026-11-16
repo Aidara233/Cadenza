@@ -17,6 +17,21 @@ expect document.querySelectorAll('.cue-q .opt').length === 3
 # 标签题：有询问在等时 `(N)` 顶到最前——窗口最小化 / 切到别的标签，这一行是唯一还看得见的地方
 expect document.title.startsWith('𝄐1 等你')
 shot 08-question
+# 提示卡可折叠：收起只藏正文（问题 / 参数原文），答复按钮留在卡头下面——
+# 「先读模型刚说了什么，再回答」不该被一张卡挤掉总谱。
+eval document.querySelector('.cue-q .cue-fold').click()
+until document.querySelector('.cue-q').classList.contains('collapsed') ;; 2000
+expect getComputedStyle(document.querySelector('.cue-q .cue-body')).display === 'none'
+expect document.querySelector('.cue-q .btn-primary').offsetParent !== null
+# 收起时点「交出答案」不许发空答案：卡自己展开，答过的内容还在原处
+eval document.querySelector('.cue-q .btn-primary').click()
+expect !document.querySelector('.cue-q').classList.contains('collapsed')
+expect document.querySelectorAll('.cue-q .cue-item').length === 3
+eval document.querySelector('.cue-q .cue-fold').click()
+until document.querySelector('.cue-q').classList.contains('collapsed') ;; 2000
+shot 08b-question-folded
+eval document.querySelector('.cue-q .cue-fold').click()
+until !document.querySelector('.cue-q').classList.contains('collapsed') ;; 2000
 eval (() => { const c = document.querySelector('.cue-q'); c.querySelectorAll('.opt input')[1].click(); const t = c.querySelector('.cue-text'); t.value = 'Cadenza'; t.dispatchEvent(new Event('input')); const f = c.querySelectorAll('.cue-form input'); f[1].value = '周五'; f[1].dispatchEvent(new Event('input')); c.querySelector('.btn-primary').click(); return 1; })()
 until !document.querySelector('.cue') ;; 6000
 # 答完 ⇒ 前缀摘掉（不留在标签题里假装还有事）

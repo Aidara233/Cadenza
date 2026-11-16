@@ -37,6 +37,10 @@ await ws.ConnectAsync(new Uri(wsUrl), default);
 var id = 0;
 var waiters = new Dictionary<int, TaskCompletionSource<JsonNode>>();
 var logs = new List<string>();
+// 未捕获异常单独计数（见 `Runtime.exceptionThrown` 那段）：它比 `expect` 失败更值得红。
+// ⚠️ 必须声明在这个文件**靠前**的位置——下面的日志回调在它之前就被定义了（局部函数按名提升，
+// 变量不会；第一版写在 `var fail = 0;` 旁边，编译不过：CS0841）。
+var exceptions = 0;
 _ = Task.Run(async () =>
 {
     var buf = new byte[1 << 20];
@@ -60,6 +64,10 @@ _ = Task.Run(async () =>
             {
                 var d = msg["params"]!["exceptionDetails"]!;
                 lock (logs) logs.Add($"[EXCEPTION] {d["exception"]?["description"] ?? d["text"]} @ {d["url"]}:{d["lineNumber"]}");
+                // ⚠️ **未捕获异常算失败**（2026-11-15）：`viz.js` 曾经因为漏 import 一个符号，
+                // 每帧抛一次 ReferenceError —— 而脚本只看 `expect`/`until`，全绿通过。
+                // 那条错误把「卡死」的排查带偏了两轮，就因为没人把它当回事。
+                Interlocked.Increment(ref exceptions);
             }
             else if (m == "Log.entryAdded")
             {
@@ -145,11 +153,12 @@ foreach (var raw in steps)
     }
 }
 lock (logs) foreach (var l in logs) Console.WriteLine("  " + l);
-Console.WriteLine($"== {fail} failed");
+if (exceptions > 0) Console.WriteLine($"FAIL 页面抛了 {exceptions} 次未捕获异常（见上面的 [EXCEPTION] 行）");
+Console.WriteLine($"== {fail} failed, {exceptions} uncaught");
 try { await Send("Browser.close"); } catch { }
 await Task.Delay(300);
 try { if (!proc.HasExited) proc.Kill(true); } catch { }
 try { Directory.Delete(profile, true); } catch { }
-return fail == 0 ? 0 : 2;
+return fail == 0 && exceptions == 0 ? 0 : 2;
 
 static string Trunc(string s, int n) => s.Length > n ? s[..n] + "…" : s;

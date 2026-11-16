@@ -1,0 +1,40 @@
+# 反代：页面**不直连核心**——它只跟 Cadenza 的进程说话，进程替它连上游。
+#
+# 这一条验的是「换了一种连法之后，那些原本靠核心直连成立的东西还成不成立」：
+#   · 页面打的是**同源**的 /core，上游是核心那个端口（不是浏览器在连它）；
+#   · 核心的路径**只有**加 /core 前缀才通（不加就是头自己静态目录里的 404）；
+#   · 上游的 4xx 原样回到页面（状态码不改写）——错误提示、token 闸全靠这一条；
+#   · 后台「系统」页说的是「经 Cadenza 进程」，WS 白名单那一格明确写**不适用**。
+# ⚠️ 其余脚本默认都跑在这条路上（run.ps1 起 serve.ps1、页面开 17994、核心在 17989），
+#    所以真正「反代能不能用」的证据是一整套全绿；这一条只是把判据写成断言。
+# ⚠️ 只有 17-auth 显式带 `?core=` 走直连（它验的是页面自己的 token 那条路）。
+goto http://127.0.0.1:17994/#stage
+wait 1500
+until document.querySelector('#conn').dataset.state === 'open' ;; 20000
+# 页面这一侧的连法：同源（base 是空串）+ /core 前缀；上游另有一格
+expect cadenza.core.via === 'head'
+expect cadenza.core.base === ''
+expect cadenza.core.prefix === '/core'
+expect cadenza.core.displayUrl === location.origin + '/core'
+expect /:17989$/.test(cadenza.core.upstreamUrl)
+# WS 打的是**本页的源**，不是核心的端口（浏览器根本没跟核心握过手）
+expect cadenza.core.wsUrl === 'ws://' + location.host + '/core/ws'
+# HTTP 也经头：/core/info 与核心自己那份是同一份（dataRoot 只在真授权时才有）
+eval (async () => { const j = await (await fetch('/core/info')).json(); return j.coreVersion + ' · ' + (j.dataRoot ? 'dataRoot 有' : 'dataRoot 无'); })()
+expect (async () => { const j = await (await fetch('/core/info')).json(); return !!j.dataRoot; })()
+# ⚠️ 前缀不是装饰：核心的路径**不加 /core 就不通**（那是头自己的静态目录，没有 /info 这个文件）
+expect (async () => (await fetch('/info')).status === 404)()
+# 上游的 404 原样交回（状态码与体都不改写）
+eval (async () => { const r = await fetch('/core/state?session=nope'); return r.status + ' [' + (await r.text()).slice(0, 40) + ']'; })()
+expect (async () => (await fetch('/core/state?session=nope')).status === 404)()
+# 后台 → 系统页：连法一格说「经 Cadenza 进程」，白名单一格说「不适用」
+eval (async () => { cadenza.bus.emit('goto', 'greenroom'); return 1; })()
+until !!document.querySelector('#view-greenroom .seg-b') ;; 8000
+eval [...document.querySelectorAll('#view-greenroom .seg-b')].find(b => b.textContent.includes('系统')).click()
+until !!document.querySelector('#view-greenroom .sys-grid') ;; 6000
+expect /经 Cadenza 进程/.test(document.querySelector('#view-greenroom .sys-grid').textContent)
+expect /不适用/.test(document.querySelector('#view-greenroom .sys-grid').textContent)
+expect /上游/.test(document.querySelector('#view-greenroom .sys-grid').textContent)
+expect /17989/.test(document.querySelector('#view-greenroom .sys-grid').textContent)
+shot 22-proxy-system
+logs

@@ -2,6 +2,7 @@
 import { h, swap, clear, fmtTokens, fmtNum, fmtTime, fmtAgo, toast, confirmDlg, modal, store, copy } from "./util.js";
 import { app, cmd } from "./model.js";
 import { renderBlock } from "./blocks.js";
+import { mark, tag, spin } from "./watchdog.js";
 
 const M = { root: null, id: null, snap: null, tab: store.get("mixTab", "axes"), usage: null, context: null, claims: [], body: null, planSel: new Set(), planErr: "", planAt: null };
 
@@ -145,6 +146,7 @@ function resetJobs(id) {
 const hasRunning = () => J.list.some((j) => j.state === "Running");
 
 async function loadJobs() {
+  mark("jobs");
   const id = M.id;
   if (!id) return;
   clearTimeout(J.timer);
@@ -235,7 +237,9 @@ function paintJobs() {
 
   const want = new Set(jobs.map((j) => j.id));
   for (const [id, row] of J.rows) if (!want.has(id)) { row.li.remove(); J.rows.delete(id); }
-  for (const job of jobs) {
+  for (let ji = 0; ji < jobs.length; ji++) {
+    const job = jobs[ji];
+    spin("J:row", ji);
     let row = J.rows.get(job.id);
     if (!row) { row = makeJobRow(); J.rows.set(job.id, row); }
     fillJobRow(row, job);

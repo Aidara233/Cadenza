@@ -7,6 +7,7 @@ import { cueCard, hydrate } from "./approvals.js";
 import { renderBlock } from "./blocks.js";
 import { projectKeyOf } from "./core.js";
 import { mixer } from "./mixer.js";
+import { mark, tag, spin } from "./watchdog.js";
 
 const S = {
   root: null,
@@ -218,6 +219,7 @@ function syncChildren(parent, desired) {
 
 function renderList() {
   if (!S.list) return;
+  mark("list");
   // 开关可能被 model 拨回去（拉归档失败时），这里的勾子跟着对账，别让控件与事实不一致。
   if (S.archInput && S.archInput.checked !== !!app.showArchived) S.archInput.checked = !!app.showArchived;
   const groups = new Map();
@@ -255,9 +257,20 @@ function renderList() {
     const included = new Set(allRows.filter(baseVisible).map((r) => r.sessionId));
     const matching = new Set(allRows.filter(matches).map((r) => r.sessionId));
     // Search results keep their ancestor chain visible as context, including archived parents.
+    // ⚠️ **这里必须有 `seen`**（2026-11-15）：父子关系是核心给的，一旦 A→B→A 这种环出现，
+    // 这个 `while` 就再也不返回——而它跑在「节目单重画」里，也就是**任何一条 sessions 事件**
+    // 都会经过的地方：表现就是整页卡死、Worker 的心跳停、CSS 动画照动。
+    // 同一处另一个祖先遍历（下面 `openChain`）本来就有 `!openChain.has(p)` 这道闸，
+    // 只有这一个漏了。环不是我们该假设不会发生的事——`subtreeOf` 早就写了「环用 seen 挡」。
     if (filtering) for (const id of matching) {
+      const seenChain = new Set([id]);
       let parent = byId.get(id)?.parentSessionId;
-      while (parent && byId.has(parent)) { included.add(parent); parent = byId.get(parent).parentSessionId; }
+      while (parent && byId.has(parent) && !seenChain.has(parent)) {
+        spin("S:filterChain", seenChain.size);
+        seenChain.add(parent);
+        included.add(parent);
+        parent = byId.get(parent).parentSessionId;
+      }
     }
     const ordered = [];
     const visited = new Set();
@@ -284,6 +297,7 @@ function renderList() {
       const stack = [...(children.get(id) || [])];
       while (stack.length) {
         const n = stack.pop();
+        spin("S:hiddenStats", seen.size);
         if (seen.has(n.sessionId)) continue;
         seen.add(n.sessionId);
         // 归档的不算：它们不会再跑、也不会再问（只可能留下一条过期的 ask）。
@@ -298,6 +312,7 @@ function renderList() {
     const walk = (r, depth, orphan = false) => {
       if (visited.has(r.sessionId)) return;
       visited.add(r.sessionId);
+      spin("S:walk", visited.size);
       const show = included.has(r.sessionId);
       const kids = children.get(r.sessionId) || [];
       const open = expanded(r.sessionId);
@@ -384,6 +399,7 @@ function renderList() {
   for (const [id] of S.rowNodes || []) if (!app.sessions.has(id)) S.rowNodes.delete(id);
   pruneTimelineCache();
   syncChildren(S.list, wantedGroups);
+  tag("L:list:out");
 }
 
 // 归档 id 那一份住在 model（拉取与对账都在那边）；这里只是转出去给同一份视图用。
@@ -478,6 +494,7 @@ function updateSessionRow(li, r, depth = 0, orphan = false, kids = { count: 0, d
 }
 
 function tickRuntime() {
+  tag("T:runtime");
   const now = Date.now();
   for (const [id, node] of S.runtimeNodes || []) {
     const r = app.sessions.get(id);
@@ -485,6 +502,7 @@ function tickRuntime() {
     const text = runtimeText(r, now);
     if (node.textContent !== text) node.textContent = text;
   }
+  tag("T:runtime:out");
 }
 
 // ---------------- timeline cache ----------------
@@ -530,6 +548,7 @@ function pruneTimelineCache() {
 let openSeq = 0;
 
 async function open(id) {
+  mark("open");
   const my = ++openSeq;
   // 打开 = 检查过进度：这一场的「待查看」高亮到此为止（model 不会再替它打回来）
   const doneRow = id ? app.sessions.get(id) : null;
@@ -667,6 +686,7 @@ function renderHead() {
   const id = app.current;
   const snap = S.snap;
   if (!id || !snap) return;
+  tag("L:head");
   const row = app.sessions.get(id) || {};
   const spec = snap.spec || {};
   const status = phaseOf(id);
@@ -739,7 +759,9 @@ function renderHead() {
       h("button.icon-btn.sh-about", { type: "button", title: "概览（元信息与全部动作）", "aria-label": "概览", onclick: () => goScreen("about") }, "⋯"),
       h("button.icon-btn.sh-more", { type: "button", "aria-label": "更多操作", title: "更多", onclick: (e) => moreMenu(e.currentTarget) }, "⋯")));
   // 概览屏与头部同一份快照：这里顺带重画它，省得再挂一个「快照变了」的事件。
+  tag("L:about");
   renderAbout();
+  tag("L:head:out");
 }
 
 /**
@@ -1115,9 +1137,12 @@ function providerTimeoutFix(seconds) {
 
 /** Everything on the stage that shows "running / waiting / retrying" redraws from the shared row here. */
 function onRows() {
+  // 面包屑：卡死时最后那条就是「进得去、出不来」的扇出步骤（`postMessage` 在调用时就送达 Worker，
+  // 所以即使主线程紧接着卡死，这一条也留得住）。
+  tag("L:list");
   renderList();
   if (!app.current) { renderIdle(); return; }
-  if (S.snap) { renderHead(); renderPerf(); }
+  if (S.snap) { tag("L:head"); renderHead(); tag("L:perf"); renderPerf(); }
 }
 
 // ---------------- performance indicator ----------------
@@ -1129,13 +1154,13 @@ function renderPerf() {
   // （值取当时的 State.Status），照它判会让这条提示一步闪一次——那正是「演奏中偶尔消失」。
   const ph = phaseOf(app.current);
   const active = ph === "generating" || ph === "tools" || ph === "waiting";
-  if (!active) { clearInterval(S.perfTimer); perfKey = ""; S.perf.hidden = true; return; }
+  if (!active) { clearInterval(S.perfTimer); perfKey = ""; S.perf.hidden = true; tag("L:perf:out"); return; }
   // Rebuild only when the shape changes, so the timer text does not flicker on every row event.
   const key = r.retry ? `retry:${r.retry.attempt}` : ph;
   S.perf.hidden = false;
   S.perf.classList.toggle("retrying", !!r.retry);
   S.perf.classList.toggle("tools", !r.retry && ph === "tools");
-  if (key === perfKey) return;
+  if (key === perfKey) { tag("L:perf:out"); return; }
   perfKey = key;
   clearInterval(S.perfTimer);
   const t = h("span.perf-t.num");
@@ -1151,6 +1176,7 @@ function renderPerf() {
     h("span.sp"),
     ph !== "waiting" ? h("button.btn.btn-sm.btn-ghost", { type: "button", onclick: () => interrupt() }, "■ 中断") : null);
   const tick = () => {
+    tag("T:perf");
     const row = app.sessions.get(app.current) || {};
     if (row.retry) {
       const left = row.retry.until - Date.now();
@@ -1159,6 +1185,7 @@ function renderPerf() {
   };
   tick();
   S.perfTimer = setInterval(tick, 200);
+  tag("L:perf:out");
 }
 // ---------------- composer ----------------
 function autosize() {
@@ -1168,6 +1195,7 @@ function autosize() {
 }
 const saveDraft = debounce(() => {
   if (!app.current) return;
+  tag("T:draft");
   const v = S.input.value;
   if (v) store.set("draft." + app.current, v); else store.del("draft." + app.current);
 }, 250);
@@ -1285,7 +1313,9 @@ async function renderCues() {
     if (my !== cueSeq || app.current !== id || S.cues.querySelector(`[data-ask-id="${a.askId}"]`)) continue;
     const card = cueCard(a, { onDone: () => setTimeout(() => card.remove(), 400) });
     S.cues.append(card);
-    card.querySelector("input,textarea,button.btn-ok,button.btn-primary")?.focus({ preventScroll: true });
+    // 收起着的卡里没有可见的输入框：焦点给「展开」，别丢给一个 display:none 里的 textarea。
+    const target = card.querySelector('.cue-fold[aria-expanded="false"]') || card.querySelector("input,textarea,button.btn-ok,button.btn-primary");
+    target?.focus({ preventScroll: true });
   }
   S.root.classList.toggle("has-cue", mine.length > 0);
   if (S.snap) renderHead();

@@ -138,6 +138,14 @@ while (true)
         // and it leaves two files behind so 「真的被杀掉了吗」有物证可查。
         else if (content.Contains("长命令"))
             message = Call("shell", "{\"command\":\"echo started > shell-started.txt; sleep 4; echo finished > shell-finished.txt\"}", "用户要跑一条慢命令，用 shell。");
+        // 一步里 N 条工具调用（21-many-tools）：关键词「一堆工具 40」。
+        // ⚠️ 读的是同一个 README.md：要证的是「一次报来 N 条」，不是 N 个不同文件。
+        else if (content.Contains("一堆工具"))
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(content, "[0-9]+");
+            var count = m.Success ? Math.Clamp(int.Parse(m.Value), 1, 500) : 40;
+            message = Calls(count, "read", "{\"path\":\"README.md\"}", "一次读一堆文件。");
+        }
         else if (content.Contains("长任务"))
         {
             // goal 循环：前两次纯文本（让核心自动续跑），第三次调 finish_goal。
@@ -281,29 +289,38 @@ static async Task WriteSse(HttpListenerContext ctx, JsonObject message, int id, 
     {
         // id / name 一次给全，**参数分两半**：核心把 `arguments` 逐字拼接，
         // 拼接坏了就看不到工具卡（那正是这条分支要证的东西）。
-        var call = calls[0]!.AsObject();
-        var fn = call["function"]!.AsObject();
-        var args = (string?)fn["arguments"] ?? "{}";
-        var cut = args.Length / 2;
-        await Send(Chunk(new JsonObject
+        //
+        // ⚠️ **一片一条调用**（21-many-tools）：模型一次发 N 条时，上游是 N 个 index 各出
+        // 自己的分片；只发第 0 条会让「一堆工具」在流式路径上悄悄退化成一条。
+        // ⚠️ 多条时**不插 150ms 间隔**：要测的正是「一次报来 N 条」的冲击，
+        // 慢慢发等于把它拉平（那测的是另一件事）。
+        var many = calls.Count > 1;
+        for (var i = 0; i < calls.Count; i++)
         {
-            ["tool_calls"] = new JsonArray(new JsonObject
+            var call = calls[i]!.AsObject();
+            var fn = call["function"]!.AsObject();
+            var args = (string?)fn["arguments"] ?? "{}";
+            var cut = args.Length / 2;
+            await Send(Chunk(new JsonObject
             {
-                ["index"] = 0,
-                ["id"] = (string?)call["id"],
-                ["type"] = "function",
-                ["function"] = new JsonObject { ["name"] = (string?)fn["name"], ["arguments"] = args[..cut] },
-            }),
-        }, null).ToJsonString());
-        await Task.Delay(150);
-        await Send(Chunk(new JsonObject
-        {
-            ["tool_calls"] = new JsonArray(new JsonObject
+                ["tool_calls"] = new JsonArray(new JsonObject
+                {
+                    ["index"] = i,
+                    ["id"] = (string?)call["id"],
+                    ["type"] = "function",
+                    ["function"] = new JsonObject { ["name"] = (string?)fn["name"], ["arguments"] = args[..cut] },
+                }),
+            }, null).ToJsonString());
+            if (!many) await Task.Delay(150);
+            await Send(Chunk(new JsonObject
             {
-                ["index"] = 0,
-                ["function"] = new JsonObject { ["arguments"] = args[cut..] },
-            }),
-        }, null).ToJsonString());
+                ["tool_calls"] = new JsonArray(new JsonObject
+                {
+                    ["index"] = i,
+                    ["function"] = new JsonObject { ["arguments"] = args[cut..] },
+                }),
+            }, null).ToJsonString());
+        }
     }
 
     await Send(Chunk(new JsonObject(), calls is { Count: > 0 } ? "tool_calls" : "stop").ToJsonString());
@@ -395,6 +412,25 @@ static JsonObject Text(string t, string? reasoning)
     var o = new JsonObject { ["role"] = "assistant", ["content"] = t };
     if (reasoning is not null) o["reasoning_content"] = reasoning;
     return o;
+}
+/// 一次给 N 条工具调用（21-many-tools）。⚠️ 各条 id 不同、参数相同——要证的是「一批 N 条」这条路径。
+static JsonObject Calls(int n, string name, string argsJson, string reasoning)
+{
+    var arr = new JsonArray();
+    for (var i = 0; i < n; i++)
+        arr.Add(new JsonObject
+        {
+            ["id"] = "call_" + Guid.NewGuid().ToString("N")[..10],
+            ["type"] = "function",
+            ["function"] = new JsonObject { ["name"] = name, ["arguments"] = argsJson },
+        });
+    return new JsonObject
+    {
+        ["role"] = "assistant",
+        ["content"] = "一次读一堆文件。",
+        ["reasoning_content"] = reasoning,
+        ["tool_calls"] = arr,
+    };
 }
 static JsonObject Call(string name, string argsJson, string reasoning) => new()
 {

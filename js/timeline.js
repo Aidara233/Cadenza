@@ -2,11 +2,15 @@
 import { h, fmtTime, fmtAgo, copy } from "./util.js";
 import { renderBlock, attachResult, toolUseBlock } from "./blocks.js";
 import { bindCodeCopy } from "./md.js";
+import { mark, tag, spin } from "./watchdog.js";
 
 /** 浮动上下文不是「干活」，是模型这一步能看见什么：核心每步合成一对调用 + 结果。
  *  时间线上一律不画（否则每步都多一张 ≈ 卡片，真正的工具调用被埋掉）；调音台 · 槽位仍有它的全文。
  *  两个判据：工具名，以及核心给合成调用用的 `floating-` 前缀——结果块里只有 callId，没有工具名。 */
 const isFloating = (callId, name) => name === "floating_context" || String(callId ?? "").startsWith("floating-");
+
+/** 页面上最多留多少条（`_trim`）。⚠️ 这是**渲染色天花板**，不是审美：停摆记录里只有这个数一直在长。 */
+const MAX_ITEMS = 400;
 
 // 同一个滚动容器会被多条缓存时间线反复 attach；复制按钮的委托只绑一次，避免监听器越积越多。
 const codeCopyRoots = new WeakSet();
@@ -155,8 +159,7 @@ export class Timeline {
 
   // ---------- history items ----------
   _item(it, into) {
-    if (it.kind === "message") return this._message({ from: it.from, blocks: it.blocks, at: it.at, key: it.id && "m:" + it.id }, into);
-    if (it.kind === "toolResult") return this._result({ id: it.id, callId: it.callId, blocks: it.blocks, at: it.at }, into);
+    if (it.kind === "message") return this._message({ from: it.from, blocks: it.blocks, at: it.at, key: it.id && "m:" + it.id }, into);    if (it.kind === "toolResult") return this._result({ id: it.id, callId: it.callId, blocks: it.blocks, at: it.at }, into);
     if (it.kind === "release") return this._release(it, into);
   }
 
@@ -182,8 +185,10 @@ export class Timeline {
     }
     if (hid && !shown.length) return;
     const body = h("div.msg-body");
-    for (const b of shown) {
+    for (let bi = 0; bi < shown.length; bi++) {
+      const b = shown[bi];
       try {
+        spin("tl:block", bi);
         if (b.kind === "toolUse") {
           const card = toolUseBlock(b, { openSession: this.openSession });
           this.cards.set(b.callId, card);
@@ -273,8 +278,51 @@ export class Timeline {
       li.classList.add("fresh");
       this.count++;
       this._emptyState();
+      this._trim();
       if (stick) this.scrollEnd();
     } else { into.append(li); this.count++; }
+  }
+
+  /**
+   * 页面上最多留 `MAX_ITEMS` 条，更早的从 DOM 里摘掉。
+   *
+   * ⚠️ 为什么要有这一条（2026-11-15）：每次停摆记录里**唯一一直在长大的数字**就是它——
+   * 时间线 36 → 72 → 119 → 160 条，节点 1850 → 3223 → 7405 → 9799。而停摆的形态是
+   * 「JS 已经退栈（`Z:task` 打过了），主线程却再没回来」，也就是**渲染步骤**里出不来。
+   * 渲染的代价只跟 DOM 有多大有关，所以这里给它一个天花板：`content-visibility` 能跳过看不见的，
+   * 但滚动容器的**高度账**（`scrollHeight` / 锚定 / 布局失效）仍然按整棵树算。
+   *
+   * 摘掉的条目的去重键一起删掉：这样「加载更早的消息」翻回去时，它们还能重新出现
+   * （不给答案撒谎：事实在核心那边，删的只是这一页的 DOM）。
+   */
+  _trim() {
+    if (!this.trimNote) {
+      this.trimNote = h("li.tl-trim.dim");
+      this.trimNote.hidden = true;
+      this.top.after(this.trimNote);
+    }
+    let n = this.list.children.length - 2;   // 减去 `.tl-top` 与这条提示
+    let dropped = 0;
+    // ⚠️ 从**提示条之后**开始摘，不能从 `.tl-top.nextElementSibling` 开始——那正好是提示条自己，
+    // 第一轮就会 `break`（第一版就是这么写的，探针里 900 条一条没摘掉）。
+    const firstContent = () => {
+      const from = this.trimNote?.parentElement === this.list ? this.trimNote : this.top;
+      return from.nextElementSibling;
+    };
+    while (n > MAX_ITEMS) {
+      const victim = firstContent();
+      if (!victim || victim === this.top) break;
+      if (victim.dataset?.key) this.seen.delete(victim.dataset.key);
+      victim.remove();
+      n--; dropped++;
+    }
+    if (!dropped) return;
+    this.trimDropped = (this.trimDropped || 0) + dropped;
+    // 卡片表里那些已经不在树上的条目一并清掉（否则结果还会往一个看不见的节点里贴）。
+    for (const [callId, el] of this.cards) if (!el.isConnected) this.cards.delete(callId);
+    for (const callId of [...this.orphans.keys()]) if (!this.cards.has(callId)) this.orphans.delete(callId);
+    this.trimNote.hidden = false;
+    this.trimNote.textContent = `更早的 ${this.trimDropped} 条不在页面上（页面只留最近 ${MAX_ITEMS} 条）；要往回看用上面的「加载更早的消息」`;
   }
 
   /** System notation inline in the score (step markers, axis changes, errors…). */
@@ -313,7 +361,7 @@ export class Timeline {
           body));
       const stick = this.atEnd();
       this.list.append(li);
-      this.live = { turn: p.turn, el: li, body, parts: new Map(), stick };
+      this.live = { turn: p.turn, el: li, body, parts: new Map(), stick, flush: 0 };
     }
 
     const kind = p.deltaKind === "reasoning" ? "reasoning" : "text";
@@ -325,8 +373,23 @@ export class Timeline {
       this.live.body.append(part);
       this.live.parts.set(key, part);
     }
-    part.textContent += p.text || "";
-    if (this.live.stick && this.atEnd()) this.scrollEnd(true);
+    part.__buf = (part.__buf || "") + (p.text || "");
+    // ⚠️ **攒到下一帧只写一次 DOM、只读一次 `scrollHeight`**（2026-11-15 实测）：
+    // 增量一秒几十条时，每条都 `textContent +=` 再读一次 `scrollHeight`（`atEnd()`）
+    // 就是每条都逼一次整份布局，而**正在说的这一条恰好是唯一不会被 `content-visibility`
+    // 跳过的**（它在视口里）。实测每次追加的代价随长度超线性上涨：
+    //   200 KB 0.1ms · 1 MB 174ms · 3 MB 595ms · 6 MB 1472ms
+    // 20 条/秒 ⇒ 主线程满负荷且永不结束（用户的体感是「模型一说话整个页面就死，刷新都没用」）。
+    if (!this.live.flush) {
+      this.live.flush = requestAnimationFrame(() => {
+        const live = this.live;
+        if (!live) return;                       // 气泡已被最终消息 / 步边界收走
+        live.flush = 0;
+        tag("R:live");
+        for (const pt of live.parts.values()) if (pt.__buf != null) commitLiveText(pt);
+        if (live.stick && this.atEnd()) this.scrollEnd(true);
+      });
+    }
   }
 
   // ---------- 「执行中」那一行（`tool.call.started`，核心 2026-11-05）----------
@@ -374,12 +437,14 @@ export class Timeline {
   /** 这一段「正在说」到此为止（最终消息 / 步起止 / 出错 / 切走都会叫它）。 */
   clearLive() {
     if (!this.live) return;
+    if (this.live.flush) { cancelAnimationFrame(this.live.flush); this.live.flush = 0; }
     this.live.el.remove();
     this.live = null;
   }
 
   // ---------- live events ----------
   apply(p) {
+    mark("tl:" + p.kind);
     switch (p.kind) {
       case "message.appended":
         this._message({ from: p.from, blocks: p.blocks, at: p.at, key: p.historyId && "m:" + p.historyId });
@@ -402,13 +467,42 @@ export class Timeline {
 
   atEnd() { const r = this.root; return !r || r.scrollHeight - r.scrollTop - r.clientHeight < 80; }
   scrollEnd(instant = false) {
+    // ⚠️ 这里**不再用 `behavior: "smooth"`**（2026-11-15）：内容还在长、列表又用了
+    // `content-visibility: auto` 时，滚动动画每帧重读 `scrollHeight`、而高度又随渲染变化——
+    // 那是又一条反馈回路。代价是贴底不能再靠动画兜住一次迟到的布局（实测会差 200 多 px），
+    // 所以改成**两帧各钉一次**：第一帧钉到当下的底，下一帧把这一帧里长出来的部分补上。
+    // `instant` 参数保留是为了不惊动调用点（现在两种都是瞬时）。
+    const pin = () => { const r = this.root; if (r) r.scrollTop = r.scrollHeight; };
     requestAnimationFrame(() => {
-      const r = this.root;
-      if (r) r.scrollTo({ top: r.scrollHeight, behavior: instant ? "auto" : "smooth" });
+      tag("R:scroll");
+      pin();
+      requestAnimationFrame(pin);
     });
   }
 }
 
 function plain(blocks) {
   return (blocks || []).map((b) => b.kind === "text" ? b.text : b.kind === "toolUse" ? `[${b.name} ${b.arguments}]` : "").filter(Boolean).join("\n\n");
+}
+
+// 「正在说」那一格最多留多少字。⚠️ 这不是审美：`textContent +=` 的代价随长度**超线性**涨
+// （实测 200 KB 0.1ms/次，6 MB 1472ms/次），20 条/秒就能把主线程焊死。临时气泡本来就不是事实
+// （步末 `message.appended` 整块换掉），所以这里只留**尾巴**——正在说的是尾巴，全文在落盘那条上。
+const LIVE_MAX = 128 * 1024;
+
+/** 把攒下的增量写进 DOM（一帧一次），超过上限就从头上丢，并留一句说明。 */
+function commitLiveText(part) {
+  let s = part.__buf || "";
+  if (s.length > LIVE_MAX) {
+    let cut = s.length - LIVE_MAX;
+    const nl = s.indexOf("\n", cut);
+    if (nl >= 0 && nl - cut < 4096) cut = nl + 1;     // 尽量从行首切，别把一行劈两半
+    s = s.slice(cut);
+    part.__buf = s;
+    if (!part.__trimmed) {
+      part.__trimmed = true;
+      part.before(h("div.live-trim.dim", `前面已经有 ${Math.round(cut / 1024)}+ KB 了：这一格只跟着显示最后 128 KB（落盘后那条消息里是全文）。`));
+    }
+  }
+  if (part.textContent !== s) part.textContent = s;
 }

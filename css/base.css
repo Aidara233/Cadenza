@@ -212,6 +212,17 @@ dialog.dlg[open] { animation: dlg-in .22s var(--ease); }
 /* ---------- 手机的外壳件（只在窄屏露头；桌面 `display:none`） ---------- */
 .topbar-back, .topbar-title, .tabbar { display: none; }
 
+/* ---- 主线程停摆记录条的横幅（`js/watchdog.js`，只在「上次真的停过」时出现一次）---- */
+.wd-bar {
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(var(--status-h) + var(--tabbar-h) + 16px);
+  z-index: 95; display: flex; align-items: center; gap: 10px; max-width: min(860px, calc(100% - 32px));
+  padding: 8px 10px 8px 14px; border-radius: 12px; background: var(--ink-3); border: 1px solid var(--brass-2);
+  color: var(--paper-2); font-size: 12.5px; box-shadow: var(--shadow);
+}
+.wd-bar b { color: var(--brass-2); font-weight: 600; }
+.wd-when { color: var(--paper-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wd-bar .sp { flex: 1; }
+
 /* ---------- toast ---------- */
 #toasts { position: fixed; right: 18px; bottom: calc(var(--status-h) + var(--tabbar-h) + 14px); z-index: 90; display: grid; gap: 8px; justify-items: end; pointer-events: none; }
 .toast {

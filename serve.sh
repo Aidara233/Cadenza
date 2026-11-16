@@ -1,33 +1,39 @@
 #!/usr/bin/env bash
-# CADENZA — 静态宿主（macOS / Linux / WSL / Git Bash）。
+# CADENZA — 页面宿主 + 控制面反代（macOS / Linux / WSL / Git Bash）。
 #
-# 与 serve.ps1 是**同一份契约的两个实现**（用户裁定 2026-10-23：只做跨平台脚本，
-# 不另起一个 exe 宿主）。两边的参数名、默认值、启动自检、报错措辞要对齐——
-# 这一对**曾经漂过**，所以：
-#   ⚠️ 改这里时**必须**同时改 serve.ps1，反之亦然。
+# **页面不直连核心：连核心的是这个进程。** 浏览器只打开本脚本服务的那一个源，页面把
+# `/core/*` 发回本进程，本进程再转发给核心（HTTP 与 WebSocket 两条都转）。
 #
-# 核心只接受 Origin 在白名单里的 WS 握手（默认 http://127.0.0.1:17990）。
-# 本脚本在**完全一样的 origin** 之上把 Cadenza 目录服务出去，且绝不缓存
-# （页面 + 几十个模块，不 no-store 就会看到旧副本而毫无提示）。
+# 为什么值得这么绕（用户 2026-11-14 的裁定，见 README「谁在连核心」）：
+#   · **token 不进浏览器**：本进程握着核心的 token（--token / LILARA_CORE_TOKEN）；
+#   · **一个源**：没有 CORS、没有混合内容、没有「本页 origin 不在核心白名单里」那类事故；
+#   · **WS 白名单不再拦人**：核心只在握手带了 Origin 时才较真，而本进程不是浏览器、不发 Origin。
 #
-# 服务器：这台机器上**现成**的那一个，按以下顺序挑第一个存在的——
-#   php -S（Unix 发行版常见，且支持单文件路由）→ python3 serve.py → busybox httpd。
-# ⚠️ 刻意**不内置**一个几十行的 HTTP 服务：bash 没有可靠的多线程 / HTTP 解析，
-#    而一个半吊子的静态服务器正是「看起来能跑、偶尔挂住」的那类东西。
-#    三个候选都没有时，脚本明确报错并给出装什么（见 END 那段），不静默降级。
+# ⚠️ 与 serve.ps1 / serve.py 是**同一份契约的实现**（用户裁定 2026-10-23：只做跨平台脚本，
+#    不另起一个 exe 宿主）。参数名、默认值、`/core` 前缀、启动自检、报错措辞要对齐：
+#   ⚠️ 改这里时**必须**同时改 serve.ps1 / serve.py，反之亦然。
+#
+# 服务器：这台机器上**现成**的那一个。这里有一条**硬约束**：反代要能同时转 HTTP 与
+# **WebSocket 隧道**，而只有 `python3 serve.py` 做得到（它自己就是那三条反代）。
+#   python3（serve.py，**完整反代**）→ php -S（serve-router.php，**静态 + 直连退路**）
+#   → busybox httpd（同上，且不关缓存）
+# ⚠️ 落到 php / busybox 时页面会**退回直连核心**（与旧版行为一致），横幅会明说为什么：
+#    php -S 单线程、拿不到已接受连接的原始套接字 ⇒ 撑不起一条长命的 WS 隧道。
+#    要「由 Cadenza 的进程连核心」，装 python3（几乎每台 Unix 都自带）。
 #
 # 用法：
-#   ./serve.sh                                 默认 17990、核心 http://127.0.0.1:17988
-#   ./serve.sh --port 17991                    换端口（同时给核心设 LILARA_HEAD_PORT=17991）
-#   ./serve.sh --core http://127.0.0.1:17999   换核心地址
+#   ./serve.sh                                 默认 17990、上游 http://127.0.0.1:17988
+#   ./serve.sh --port 17991                    换端口
+#   ./serve.sh --core http://127.0.0.1:17999   换上游（本进程替页面连的那个核心）
+#   ./serve.sh --token <token>                 核心开了鉴权时，把 token 交给本进程（页面就不带了）
 #   ./serve.sh --root /path/to/Cadenza         换根目录（默认本脚本所在目录）
 #   ./serve.sh --bind 127.0.0.1                收回仅本机（默认 0.0.0.0，与核心的裁定一致）
 #   ./serve.sh --no-check                      跳过启动自检
 #   ./serve.sh --no-open                       不自动打开浏览器（默认会尝试）
 #   ./serve.sh --open-only                    只打开浏览器（服务器已在别处跑着时）
 #
-# 环境变量：LILARA_HEAD_PORT / LILARA_CORE / LILARA_HEAD_BIND 是**默认值的来源**
-# （与核心自己的头同名），命令行参数优先。
+# 环境变量：LILARA_HEAD_PORT / LILARA_CORE / LILARA_CORE_TOKEN / LILARA_HEAD_BIND 是
+# **默认值的来源**（与核心自己的头同名），命令行参数优先。
 #
 # 停止：Ctrl+C。
 
@@ -35,14 +41,11 @@ set -u
 
 PORT="${LILARA_HEAD_PORT:-17990}"
 CORE="${LILARA_CORE:-http://127.0.0.1:17988}"
-# 「核心地址是不是用户钉的」：钉了就照抄，没钉就让实现跟着**请求的 Host** 走
-# （头绑到局域网之后，页面里的 127.0.0.1 是打开页面的那台设备自己）。
-CORE_EXPLICIT=0
-[ -n "${LILARA_CORE:-}" ] && CORE_EXPLICIT=1
+TOKEN="${LILARA_CORE_TOKEN:-}"
 # 监听地址。**默认对局域网开放（0.0.0.0）**——与核心 2026-11-05 那个裁定一致：
 # 同一网络里的手机/平板直接打开页面，而不是默认不可用。要收回本机：--bind 127.0.0.1。
-# ⚠️ Windows 上 serve.ps1 走 HttpListener，回环之外还要一条 URL ACL（它会在失败时退回
-#    仅本机并把那条 netsh 命令印出来）；本脚本这三个服务器没有这个概念。
+# ⚠️ 页面已经不只是静态文件了：`/core/*` 这条反代把核心也带了出去，所以「谁能打开页面」
+#    现在等于「谁能驱动核心」。要拦人：核心设 LILARA_AUTH=1 + 本脚本 --token。
 BIND="${LILARA_HEAD_BIND:-0.0.0.0}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK=1
@@ -56,8 +59,10 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --port)      [ $# -ge 2 ] || { echo "✗ --port 缺值" >&2; exit 2; }; PORT="$2"; shift 2 ;;
         --port=*)    PORT="${1#*=}"; shift ;;
-        --core)      [ $# -ge 2 ] || { echo "✗ --core 缺值" >&2; exit 2; }; CORE="$2"; CORE_EXPLICIT=1; shift 2 ;;
-        --core=*)    CORE="${1#*=}"; CORE_EXPLICIT=1; shift ;;
+        --core)      [ $# -ge 2 ] || { echo "✗ --core 缺值" >&2; exit 2; }; CORE="$2"; shift 2 ;;
+        --core=*)    CORE="${1#*=}"; shift ;;
+        --token)     [ $# -ge 2 ] || { echo "✗ --token 缺值" >&2; exit 2; }; TOKEN="$2"; shift 2 ;;
+        --token=*)   TOKEN="${1#*=}"; shift ;;
         --bind)      [ $# -ge 2 ] || { echo "✗ --bind 缺值" >&2; exit 2; }; BIND="$2"; shift 2 ;;
         --bind=*)    BIND="${1#*=}"; shift ;;
         --root)      [ $# -ge 2 ] || { echo "✗ --root 缺值" >&2; exit 2; }; ROOT="$2"; shift 2 ;;
@@ -73,9 +78,6 @@ done
 
 case "$PORT" in ''|*[!0-9]*) echo "✗ --port 必须是数字：'$PORT'" >&2; exit 2 ;; esac
 CORE="${CORE%/}"
-# 核心端口：没显式给地址时，实现要用它拼「同一个地址 + 核心端口」。
-CORE_PORT="${CORE##*:}"
-case "$CORE_PORT" in ''|*[!0-9]*) CORE_PORT=17988 ;; esac
 ROOT="$(cd "$ROOT" 2>/dev/null && pwd)" || { echo "✗ --root 不存在：'$ROOT'" >&2; exit 2; }
 [ -f "$ROOT/index.html" ] || { echo "✗ $ROOT 里没有 index.html——这不是 Cadenza 目录" >&2; exit 2; }
 
@@ -86,13 +88,12 @@ case "$BIND" in
     *) LOOPBACK=0 ;;
 esac
 
-# 对局域网开放时把代价与可达地址说出来（与 serve.ps1 逐句对齐）。
-# ⚠️ 头只发静态文件，**真正能被驱动的是核心**：「要不要拦人」那道闸在核心那边（LILARA_AUTH）。
+# 对局域网开放时把代价与可达地址说出来（与 serve.ps1 / serve.py 逐句对齐）。
 lan_block() {
     [ "$LOOPBACK" = "0" ] || return 0
-    echo "  ⚠️ 头对局域网开放（$BIND）：同一网络里的设备都能打开这个页面。"
-    echo "     核心那边也得能被这个地址连上（LILARA_BIND 默认已是 0.0.0.0）。"
-    echo "     要收回本机：--bind 127.0.0.1；要拦人：核心设 LILARA_AUTH=1。"
+    echo "  ⚠️ 对局域网开放（$BIND）：同一网络里的设备都能打开页面，**并且能经 /core 驱动核心**。"
+    echo "     核心自己绑哪里已经不重要了（是这台在转发）；要收回本机：--bind 127.0.0.1。"
+    echo "     要拦人：核心设 LILARA_AUTH=1，再把 token 交给本进程（--token）。"
     # 可达地址：换一台设备时照着输。拿不到就跳过（列不出来不该影响启动）。
     if command -v hostname >/dev/null 2>&1; then
         for addr in $(hostname -I 2>/dev/null || true); do
@@ -102,8 +103,6 @@ lan_block() {
     fi
 }
 
-# ⚠️ 判据是**模式**：核心 2026-11-05 起默认放行 `http://*:<头端口>`（任意主机，端口钉住），
-# 所以 localhost / 127.0.0.1 / 局域网 IP 打开都行——逐字相等会把这些全部误报成「不吻合」。
 open_browser() {
     [ "$OPEN" = "1" ] || return 0
     if command -v xdg-open >/dev/null 2>&1; then xdg-open "$URL/" >/dev/null 2>&1 &
@@ -114,8 +113,12 @@ open_browser() {
 }
 
 echo "CADENZA — $URL"
-echo "  页面 origin 必须落在核心的白名单上（默认模式 http://*:$PORT = 任意主机 + 这个端口）"
-echo "  核心 $(if [ "$CORE_EXPLICIT" = "1" ]; then echo "$CORE"; else echo "http://<打开页面的那台机器的地址>:$CORE_PORT（跟着请求的 Host 走；--core 可钉死）"; fi)"
+echo "  页面 经由本进程连核心：/core/* → $CORE（HTTP 与 WS 都转）"
+if [ -n "$TOKEN" ]; then
+    echo "  token 由本进程持有（--token / LILARA_CORE_TOKEN）——页面不带凭据"
+else
+    echo "  token 未配置：页面经 /core 转过来的 Authorization 会被原样转给核心"
+fi
 echo "  根目录 $ROOT"
 echo "  监听 $(if [ "$LOOPBACK" = "1" ]; then echo '127.0.0.1（只在本机；要对局域网开放用 --bind 0.0.0.0）'; else echo "$BIND（对局域网开放；收回本机：--bind 127.0.0.1）"; fi)"
 lan_block
@@ -123,31 +126,33 @@ echo ""
 
 if [ "$OPEN_ONLY" = "1" ]; then OPEN=1; open_browser; echo "  已在浏览器打开 $URL/"; exit 0; fi
 
-# 启动自检：把「致命但安静」的那一件事说出来（与 serve.ps1 逐句对齐）。
+# ---- 选服务器 ----
+# ⚠️ python3 排第一：**只有它能把 /core/* 与 WS 隧道一起转**（见文件头那条硬约束）。
+HAVE_PY=0
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; assert sys.version_info[0] == 3' >/dev/null 2>&1; then
+    HAVE_PY=1
+fi
+
+# 启动自检：把「致命但安静」的那一件事说出来（与 serve.ps1 / serve.py 逐句对齐）。
+# ⚠️ 查的是**本进程到上游**那条路；也**不再**检查 WS 白名单吻合与否——握手是本进程发的、
+#    不带 Origin，核心一律放行（旧版那句「设 LILARA_HEAD_PORT=… 后重启核心」在这里已无从谈起）。
 if [ "$CHECK" = "1" ] && command -v curl >/dev/null 2>&1; then
     info="$(curl -fsS -m 2 "$CORE/info" 2>/dev/null || true)"
     if [ -z "$info" ]; then
-        echo "  ⚠️ 核心没应答（$CORE）"
-        echo "     页面会显示「已断开 · 重连中」。先把核心起起来。"
+        echo "  ⚠️ 上游没应答（$CORE）"
+        echo "     页面会显示「Cadenza 进程连不上核心」。先把核心起起来（核心在别的机器上就给 --core）。"
     else
-        allowed="$(printf '%s' "$info" | sed -n 's/.*"allowedOrigin":"\([^"]*\)".*/\1/p')"
-        # case 的模式里 `*` 是通配（这正是我们要的语义：任意主机 + 这个端口），
-        # 引号里的 `*` 才是字面量（核心把白名单设成 `*` = 放行任意 origin，仅调试用）。
-        case "$allowed" in
-            "$URL"|"*"|http://*:"$PORT") ok=1 ;;
-            *) ok=0 ;;
-        esac
-        if [ "$ok" = "1" ]; then
-            echo "  ✓ 核心在，WS 白名单 = $allowed"
-        else
-            echo "  ⚠️ 核心在，但白名单是 ${allowed:-?} —— 页面 origin 是 $URL"
-            echo "     浏览器不会把握手 403 交给页面 JS。设 LILARA_HEAD_PORT=$PORT 后重启核心。"
-        fi
-        # 开了鉴权而页面不知道 = 「页面一片空白，没人说得出为什么」。token 只在核心的控制台里，
-        # 这里只指路、不复述。
+        ver="$(printf '%s' "$info" | sed -n 's/.*"coreVersion":"\([^"]*\)".*/\1/p')"
+        echo "  ✓ 上游在：$CORE（版本 ${ver:-?}）"
         if printf '%s' "$info" | grep -Fq '"authRequired":true'; then
-            echo "  ⚠️ 核心开了鉴权（LILARA_AUTH=1）：页面第一次连会要 token。"
-            echo "     token 在核心的控制台启动横幅里（访问 token … 那一行）。"
+            if [ -n "$TOKEN" ]; then
+                echo "  ✓ 核心开了鉴权（LILARA_AUTH=1），token 由本进程持有"
+            else
+                echo "  ⚠️ 核心开了鉴权（LILARA_AUTH=1），而本进程没配 token。"
+                echo "     token 在核心的控制台启动横幅里（访问 token … 那一行）。两条路："
+                echo "       · 交给本进程（推荐，页面就不带凭据了）：--token <token> 或设 LILARA_CORE_TOKEN"
+                echo "       · 或者让页面自己填：页面第一次连会弹 token 闸，经 /core 转过去的核心照样认"
+            fi
         fi
     fi
 elif [ "$CHECK" = "1" ]; then
@@ -155,49 +160,49 @@ elif [ "$CHECK" = "1" ]; then
 fi
 echo ""
 
-# ---- 选服务器 ----
-# ⚠️ 两个 `exec`：端口会被服务器直接占用，本脚本不再持有子进程——
-#    Ctrl+C 直接打给服务器，不留一个「壳还在、服务器没了」的僵尸。
+# ---- 有多好就用多好：python3 完整反代，其余退成直连 ----
+
+if [ "$HAVE_PY" = "1" ]; then
+    open_browser
+    echo "  服务器：python3（serve.py；静态 + /core 反代 + WS 隧道，全部由它给）"
+    set -- --bind "$BIND" --port "$PORT" --root "$ROOT" --core "$CORE"
+    if [ -n "$TOKEN" ]; then set -- "$@" --token "$TOKEN"; fi
+    exec python3 "$ROOT/serve.py" "$@"
+fi
+
+echo "  ⚠️ 这台机器上没有 python3 ⇒ **反代起不来**（php -S / busybox httpd 撑不起 WS 隧道）。" >&2
+echo "     页面会退回「自己直连核心」那种旧形态：token 与 origin 白名单又得在浏览器这一侧操心。" >&2
+echo "     要有由 Cadenza 的进程连核心，装一个 python3 即可（多数系统自带）：" >&2
+echo "       · Debian / Ubuntu   sudo apt install python3" >&2
+echo "       · Fedora            sudo dnf install python3" >&2
+echo "       · Arch              sudo pacman -S python" >&2
+echo "       · macOS             xcode-select --install   （自带 python3）" >&2
+echo "" >&2
 
 if command -v php >/dev/null 2>&1; then
     open_browser
-    echo "  服务器：php -S $BIND:$PORT（-t 根目录，路由交给 serve-router.php 处理 no-store）"
-    # ⚠️ 只有**显式**给了核心地址才传 `LILARA_CORE`：serve-router.php 拿它当「别改写我」的信号，
-    #    没给时它自己跟着请求的 Host 走。早先这里连 `--core` 都没传过去，php 那条路把它丢了。
-    if [ "$CORE_EXPLICIT" = "1" ]; then export LILARA_CORE="$CORE"; fi
-    export LILARA_CORE_PORT="$CORE_PORT"
+    echo "  服务器：php -S $BIND:$PORT（静态 + 直连退路；路由交给 serve-router.php 处理 no-store）"
+    echo "  ⚠️ 页面直连核心：core 地址由 serve-router.php 按请求的 Host 拼出来。"
+    echo "     对局域网开放时，别的设备打开页面会去连**它自己**能看到的那个核心地址。"
     exec php -S "$BIND:$PORT" -t "$ROOT" "$ROOT/serve-router.php"
-fi
-
-if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; assert sys.version_info[0] == 3' >/dev/null 2>&1; then
-    open_browser
-    echo "  服务器：python3（serve.py；no-store 与 /config.json 由它给）"
-    set -- --bind "$BIND" --port "$PORT" --root "$ROOT" --core-port "$CORE_PORT"
-    if [ "$CORE_EXPLICIT" = "1" ]; then set -- "$@" --core "$CORE"; fi
-    exec python3 "$ROOT/serve.py" "$@"
 fi
 
 if command -v busybox >/dev/null 2>&1 && busybox --list 2>/dev/null | grep -qx httpd; then
     open_browser
     echo "  服务器：busybox httpd（⚠️ 不支持 no-store；改了 js/css 记得硬刷新）"
-    if [ "$LOOPBACK" = "0" ]; then
-        # ⚠️ 这一条是「能用」与「看起来能用」的分界：busybox httpd 没有路由，
-        # 也就没有 /config.json ⇒ 页面会退回默认核心地址 127.0.0.1:17988，
-        # 而那在别的设备上指的是**设备自己**。
-        echo "  ⚠️ busybox 不给 /config.json：页面会退回 127.0.0.1:17988，局域网里的别的设备连不上核心。"
-        echo "     要对局域网开放，换 php 或 python3（serve.py 会按请求的 Host 拼核心地址）。"
-    fi
+    echo "  ⚠️ busybox 也不给 /config.json：页面会退回默认核心地址 127.0.0.1:17988，"
+    echo "     而那在别的设备上指的是**设备自己**。要能用局域网，装 python3 或 php。"
     exec busybox httpd -f -p "$BIND:$PORT" -h "$ROOT"
 fi
 
 cat >&2 <<'EOF'
-✗ 这台机器上没有可用的静态服务器。装任意一个即可（都是系统自带的包，不需要本项目的依赖）：
+✗ 这台机器上既没有 python3，也没有 php / busybox httpd。装任意一个即可：
 
-  · Debian / Ubuntu   sudo apt install php-cli      （最推荐：serve.sh 会用一个 20 行的路由脚本关掉缓存）
-  · Fedora            sudo dnf install php-cli
-  · Arch              sudo pacman -S php
-  · macOS             brew install php
-  · 或者              sudo apt install python3     （serve.py 同样关掉了缓存，与 php 那条等价）
-  · 或者              sudo apt install busybox    （⚠️ busybox httpd 不支持 no-store，改了前端要硬刷新）
+  · Debian / Ubuntu   sudo apt install python3   （**首选**：serve.py 会做静态 + /core 反代 + WS 隧道）
+  · Fedora            sudo dnf install python3
+  · Arch              sudo pacman -S python
+  · macOS             xcode-select --install     （自带 python3）
+  · 或者              sudo apt install php-cli   （⚠️ 只能静态 + 页面直连核心，没有反代）
+  · 或者              sudo apt install busybox   （⚠️ 同上，且不关缓存）
 EOF
 exit 1

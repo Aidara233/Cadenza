@@ -1,5 +1,6 @@
 // Cadenza · md — small, safe markdown → HTML. Everything is escaped first; only our own tags are emitted.
 import { esc } from "./util.js";
+import { spin } from "./watchdog.js";
 
 function inline(s) {
   // s is already escaped. Protect code spans first.
@@ -79,6 +80,10 @@ export function md(src) {
   let out = "";
   let i = 0;
   while (i < lines.length) {
+    // 面包屑：`md:loop#N` 一直涨 ⇒ 这个循环没在前进（行号不涨 = 某条分支没推进 `i`）。
+    // `18-streaming` 与 `b1` 的 fuzz 都没能把它卡住，但「没找到」不等于「不会」——
+    // 真卡住时这一条就是证据。
+    spin("md:loop", i);
     const line = lines[i];
     const fence = /^\s*(`{3,}|~{3,})\s*([\w+#.-]*)\s*$/.exec(line);
     if (fence) {

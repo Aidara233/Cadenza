@@ -12,6 +12,7 @@
 // 提示音默认关闭（浏览器要手势解锁），点右下角 ♪ 打开；只给大事件配音，底纹永远静音。
 import { app, phaseOf } from "./model.js";
 import { play, audioLevels, onAudioChange } from "./audio.js";
+import { tag, spin } from "./watchdog.js";
 import { openTuning } from "./tuning.js";
 
 const SPEED = 36;       // px/s
@@ -83,10 +84,15 @@ const V = {
   w: 0, h: 0, dpr: 1, raf: 0, timer: 0,
   notes: [], ticks: [], fam: new Map(), slot: new Map(), errAt: new Map(),
   times: [], frameTimes: [], last: null,
-  reduced: false,
+  reduced: false, dead: false,
 };
 
 export function mountViz(canvas, tempoEl) {
+  // `?noviz=1`：不装顶栏事件谱（canvas 那一圈 rAF）。
+  // 为什么留这个开关：卡死的形态是「主线程在一个任务里不出来、Worker 没事、DevTools 也读不到」，
+  // 而这类症状最可能是某个**每帧跑的东西**（画布 / 逐帧列表）在特定机器上出事。在用户那里
+  // 二分比在这里猜有用——关掉它卡死消失 ⇒ 就锁定这一块，我再去查画布。
+  if (new URLSearchParams(location.search).has("noviz")) return;
   V.cv = canvas; V.ctx = canvas.getContext("2d"); V.tempoEl = tempoEl;
   V.wrap = canvas.parentElement;
   V.wrap.title = TITLE;
@@ -122,18 +128,21 @@ function resize() {
 }
 
 function kick() {
+  if (V.dead) return;
   if (V.raf || V.timer) return;
   V.raf = requestAnimationFrame(draw);
 }
 
 function tempo() {
+  tag("T:tempo");
   const now = Date.now();
   V.times = V.times.filter((t) => now - t < 60000);
   V.frameTimes = V.frameTimes.filter((t) => now - t < 60000);
-  if (!V.tempoEl) return;
+  if (!V.tempoEl) { tag("T:tempo:out"); return; }
   V.tempoEl.textContent = "♩ = " + V.times.length;
   V.tempoEl.title = `最近 60 秒：行为 ${V.times.length} 次 · 网络帧 ${V.frameTimes.length} 帧`
     + (V.last ? ` · 上一次「${V.last.label}」${new Date(V.last.at).toLocaleTimeString("zh-CN", { hour12: false })}` : "");
+  tag("T:tempo:out");
 }
 
 // ---------------------------------------------------------------- 入账
@@ -156,6 +165,7 @@ const seenPhase = new Map();
 function watchPhases() {
   for (const r of app.sessions.values()) seenPhase.set(r.sessionId, phaseOf(r.sessionId));
   app.bus.on("sessions", () => {
+    tag("L:vizphase");
     for (const r of app.sessions.values()) {
       const ph = phaseOf(r.sessionId);
       const prev = seenPhase.get(r.sessionId);
@@ -167,6 +177,7 @@ function watchPhases() {
         note(doneNote({ turn: r.turn }), { sessionId: r.sessionId, kind: "phase.idle" });
       }
     }
+    tag("L:vizphase:out");
   });
 }
 
@@ -272,8 +283,24 @@ function fermata(ctx, x, y, r, ink, alpha) {
 
 function draw() {
   V.raf = 0;
+  // ⚠️ **每帧跑的回调必须有兜底**（2026-11-15 的教训，血的）：这里曾经因为漏 import 一个符号
+  // （`spin`），`draw()` 在第一句就抛，于是**每秒 60 条未捕获异常**——DevTools 开着时每条都要走
+  // 一次错误上报，画布也再没动过，而排查时看起来像「渲染卡死」。抛一次就停用并说清楚，
+  // 别让它自己刷屏（那会把真正的线索埋掉）。
+  if (V.dead) return;
+  try { drawFrame(); } catch (e) {
+    V.dead = true;
+    V.timer = 0;
+    console.warn("[cadenza] 顶栏事件谱已停用：渲染回调抛错（只报一次）", e);
+  }
+}
+
+function drawFrame() {
+  // 面包屑：`Z:task`（JS 退栈）之后紧接着跑的就是这些 rAF 回调。它是「最后一格」时，
+  // 就得在这里找循环，而不是去怪浏览器。
+  spin("R:viz", V.notes.length + V.ticks.length);
   const { ctx, w, h, dpr } = V;
-  if (!ctx || !w) { V.timer = 0; return; }
+  if (!ctx || !w) { V.timer = 0; tag("R:viz:out"); return; }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
 
@@ -376,6 +403,9 @@ function draw() {
   }
 
   // --- 播放头旁边挂一个 fermata：现在有东西在等你 ---
+  // ⚠️ 它让 `live` 一直成立：有一张询问挂着时，画布本来是能闲下来的，却被这颗脉冲钉在
+  // 60fps 上**整夜重绘**（标签页永不休眠）。判据分开记：`moving` 只认音符 / 底纹。
+  const moving = live;
   if (app.approvals.size) {
     const pulse = 0.45 + 0.3 * (0.5 + 0.5 * Math.sin(now / 420));
     fermata(ctx, head + 13, staffTop + 3, 4.2, INK.amber, pulse);
@@ -391,10 +421,15 @@ function draw() {
   if (cut) V.ticks.splice(0, cut);
 
   // 有东西在动才继续画；减少动效或标签页在后台时降成 2 次/秒，只补帧不逐帧
-  if (!live) { V.timer = 0; return; }
+  if (!live) { V.timer = 0; tag("R:viz:out"); return; }
   if (V.reduced || document.hidden) {
     V.timer = setTimeout(() => { V.timer = 0; kick(); }, 400);
+  } else if (!moving) {
+    // 只剩「等你」那颗脉冲：10 次/秒看得出来它在呼吸，又不至于让一个闲着的标签页
+    // 整夜按 60fps 重绘画布（那正是「浏览器莫名其妙变卡」最廉价的一种来源）。
+    V.timer = setTimeout(() => { V.timer = 0; kick(); }, 100);
   } else {
     V.raf = requestAnimationFrame(draw);
   }
+  tag("R:viz:out");
 }

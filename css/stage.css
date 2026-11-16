@@ -145,10 +145,39 @@
   background:
     repeating-linear-gradient(180deg, transparent 0 63px, var(--staff) 63px 64px) 0 0 / 100% 64px;
   background-attachment: local;
+  /* ⚠️ **关掉滚动锚定**（2026-11-15）：这张列表每来一条消息都会 `scrollTo` 到底（`scrollEnd`），
+     而下面又用了 `content-visibility: auto`。两者叠在一起时，Blink 的「锚点修正 → 重排 → 高度变了
+     → 再修正」是一条**反馈回路**；它的表现正是主线程在渲染步骤里出不来（JS 早已退栈，
+     CSS 动画照动、点击全停）。关掉锚定就把这条回路的另一半拆了——它本来也不该在这里起作用：
+     我们自己就在跟踪「是不是贴底」。 */
+  overflow-anchor: none;
 }
 
 /* ---- timeline list ---- */
 .tl-list { list-style: none; margin: 0 auto; padding: 0 28px; max-width: 920px; }
+/* ---- 时间线列表的「跳过看不见的」与「只留最近 400 条」（2026-11-15 定稿）----
+ *
+ * 11-14 加过 `content-visibility: auto`，理由与基准都是真的：`_put` / `startToolCall` 每追加一条
+ * 都要读一次 `scrollHeight`（`atEnd()`），而**读它 = 立刻做一次整份布局**；会话越长越贵。
+ * 离线基准（真 CSS + 真 Timeline，一步 40 条 write + 40 条结果 + 步末消息）：
+ *   · 1500 条：1525ms（一帧 849ms）→ 458ms（147ms）；3000 条：3004ms → 558ms；铺满 3000 条：52.4s → 8.7s
+ *   · 热点不在工具卡本身（20 张 375KB 参数的卡只要 55ms），而在「每来一条就整份布局」。
+ *
+ * ⚠️ **现在默认关掉它**（`.cv` 由 `?cv=1` 打开），换成 `Timeline._trim` 的 400 条硬帽子：
+ *   · 3000 条那种情形根本到不了，跳过要救的病没了；
+ *   · 而 `content-visibility: auto` + `contain-intrinsic-size` 自带另一类风险——跳过项的高度账、
+ *     锚定、每次追加都要重算的 scrollHeight，是 Blink 里「布局反馈回路」的常见形状；
+ *   · 用户的停摆记录恰好是那个形状：**JS 早已退栈（`Z:task` 打过了）、主线程在渲染步骤里不返回**，
+ *     DOM 只有 8k 节点、堆 10 MB。
+ * 关掉之后的实测（400 条帽子 + 无 content-visibility）：一步 40 条工具调用 83ms、40 条结果 2ms、
+ * 收尾消息 3ms、贴底 0px。**宁可多花一点布局，不要那种停不下来的病。**
+ *
+ * 旧注释留下的两条代价仍然有效（打开 `.cv` 时要记得）：跳过的子树里 `position: sticky` 不生效
+ * （本仓只有 `.md thead th` 一处，在表格自己的盒子里）；`contain: paint` 会裁掉「溢出这一条」的装饰
+ * ——`.tl-list > li` 底下没有这种装饰。它**不改变** DOM 与文本：`Ctrl+F`、`textContent` 都照旧。
+ */
+.tl-list > li { }
+.cv .tl-list > li { content-visibility: auto; contain-intrinsic-size: auto 240px; }
 .tl-top { display: flex; justify-content: center; padding: 10px; }
 .tl-top.loading button { opacity: .5; pointer-events: none; }
 .tl-origin { display: flex; align-items: center; gap: 12px; justify-content: center; padding: 20px 0 12px; color: var(--paper-4); font: italic 13px var(--serif); }
@@ -191,6 +220,12 @@
 .live-now { font: 11px var(--mono); }
 .live-now::after { content: "▍"; margin-left: 2px; color: var(--brass); animation: live-caret 1s steps(2) infinite; }
 @keyframes live-caret { 50% { opacity: 0; } }
+/* 临时气泡被截断时的说明（只在超过 128 KB 时出现，见 timeline.commitLiveText） */
+.live-trim { font-size: 11.5px; color: var(--paper-4); margin-bottom: 4px; }
+/* 超长正文：前 128 KB 排版，其余原文照列（见 blocks.textNodes） */
+.md-more { margin: 10px 0 4px; font-size: 11.5px; color: var(--paper-4); }
+/* 卡里没画出来的那部分（工具参数 / 结果 / 写入内容被截断时的说明） */
+.tc-more { margin: 4px 0 0; font-size: 11.5px; color: var(--paper-4); }
 
 /* 「执行中」那一行（`tool.call.started`，核心 2026-11-05）：与流式气泡同一条纪律——
    **临时的**，步末的模型消息一到就整块换掉。所以别画得像正式消息：虚线边 + 半透明的
@@ -337,6 +372,18 @@ pre.out { margin: 0; padding: 10px 12px; max-height: 360px; overflow: auto; back
 .cue-who code { font-family: var(--mono); font-size: 13px; color: var(--brass-2); }
 .cue-timer { font-size: 13px; padding: 3px 9px; border-radius: 999px; background: var(--ink-0); color: var(--paper-2); border: 1px solid var(--line); }
 .cue-timer.late { color: var(--vermilion); border-color: var(--vermilion); animation: blink 1s steps(2) infinite; }
+/* 折叠开关：一屏里总谱要留着读模型刚说的话。收起只藏正文，答复按钮仍在卡头下面 */
+.cue-fold {
+  flex: none; display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 10px 0 8px;
+  border-radius: 999px; border: 1px solid var(--line); background: var(--ink-0); color: var(--paper-3);
+  font: 12px/1 var(--sans); cursor: pointer; transition: color .15s, border-color .15s, background .15s;
+}
+.cue-fold:hover { color: var(--paper); border-color: var(--paper-4); background: var(--ink-2); }
+.cue-fold:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+.cue-fold-caret { font-size: 11px; line-height: 1; }
+.cue.collapsed .cue-body { display: none; }
+.cue.collapsed .cue-h { margin-bottom: 0; }
+.cue.collapsed .cue-f { margin-top: 10px; }
 .cue-body { display: grid; gap: 12px; }
 .cue-item { display: grid; gap: 8px; }
 .cue-q-text { font-size: 14px; }

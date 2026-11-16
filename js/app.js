@@ -1,25 +1,26 @@
 // Cadenza · app — boot, routing, connection, global streams, keyboard.
 import { $, $$, h, swap, store, toast, fmtNum } from "./util.js";
-import { Core, resolveCoreBase } from "./core.js";
-import { app, loadRegistries, refreshSessions, refreshPresets, onGlobalEvent, setCurrent, scheduleRefresh, resetSubscriptions } from "./model.js";
+import { Core, resolveCore, setActiveCore } from "./core.js";
+import { app, loadRegistries, refreshSessions, refreshPresets, onGlobalEvent, setCurrent, scheduleRefresh, resetSubscriptions, phaseOf } from "./model.js";
 import { mountStage, newSessionDialog, focusComposer, setStageScreen } from "./stage.js";
+import { mountWatchdog, tag } from "./watchdog.js";
 import { mountScore, scoreShown } from "./score.js";
 import { mountLedger, ledgerShown } from "./ledger.js";
 import { mountGreenRoom, greenRoomShown } from "./greenroom.js";
 import { mountViz } from "./viz.js";
 import { mountRunState } from "./runstate.js";
 import { openPalette } from "./palette.js";
-import { setCoreBase } from "./blocks.js";
 
 const VIEWS = ["stage", "score", "ledger", "greenroom"];
 const VERSION = "1.0.0";
 const ON_SHOW = { score: scoreShown, ledger: ledgerShown, greenroom: greenRoomShown };
 
 async function boot() {
-  const base = await resolveCoreBase();
-  // 图片的字节按 `GET /store/{sha256}` 去取，而 `blocks.js` 不能 import 这里（循环）。
-  setCoreBase(base);
-  app.core = new Core(base);
+  const conn = await resolveCore();
+  // 图片的字节按 `GET /store/{sha256}` 去取，而 `blocks.js` 不能 import 这里（循环）——
+  // 所以地址的拼法由 `core.js` 的 `coreUrl()` 收着，这里只是把这次的连法告诉它。
+  setActiveCore(conn);
+  app.core = new Core(conn);
   window.cadenza = app; // for console poking; not an API
 
   mountStage($("#view-stage"));
@@ -29,6 +30,18 @@ async function boot() {
   mountViz($("#staff"), $("#tempo"));
   // 顶栏那几格运行状态：切到哪个视图都在（舞台的头部与演奏条只管舞台）。
   mountRunState($("#runstate"));
+  // 主线程停摆记录器（`js/watchdog.js`）：卡死时主线程自己什么都报不出来，这条 Worker 是唯一
+  // 能留下「刚才在做什么」的地方。开销 = 一条 postMessage/1.5 秒。
+  // 只有 model 知道的那几格由这里交回去（watchdog 不 import model，免得成环）。
+  mountWatchdog(() => ({
+    view: app.view,
+    sessions: app.sessions.size,
+    approvals: app.approvals.size,
+    cur: app.current ? String(app.current).slice(0, 8) : "",
+    phase: app.current ? phaseOf(app.current) : "",
+    framesIn: app.core?.stats.in ?? null,
+    framesOut: app.core?.stats.out ?? null,
+  }));
 
   for (const b of $$(".view-tab")) b.addEventListener("click", () => go(b.dataset.view));
   // 手机底部主导航（≤760 才显示，桌面 `display:none`）：同一份 `app.view`。
@@ -57,11 +70,19 @@ async function boot() {
   app.core.on("reconnected", async () => { await loadRegistries(); scheduleRefresh(10); });
   app.core.on("badframe", (f) => toast("核心说帧形状不对：" + f.reason, "err"));
   // 核心要 token 而这次没带对（或缺）⇒ 铺一层闸。`hadToken` 只影响闸上那句原因的说法。
-  app.core.on("auth", (d) => openTokenGate(d.reason));
+  // ⚠️ 代理模式下 401 有两种来路：头没配 token（页面该填 → 弹闸），头配了而它错了
+  // （页面填什么都没用 → 只说清楚，别把闸铺上去让它循环）。
+  app.core.on("auth", (d) => {
+    if (d.owner === "head") showBanner("headAuth", d); else openTokenGate(d.reason);
+  });
 
   const initial = parseHash();
   go(VIEWS.includes(initial.view) ? initial.view : "stage", true);
   mountTabbar();
+  // 诊断开关：`?cv=1` 打开时间线 `li` 的 `content-visibility: auto`（见 `css/stage.css` 里那段说明
+  // 与 2026-11-14 的基准）。**默认不打开**：那个属性是「布局反馈回路」的常见形状，而停摆记录
+  // 指向的正是「JS 退了栈、渲染步骤不返回」；列表现在有 400 条的硬帽子，不再需要靠它来救长列表。
+  if (new URLSearchParams(location.search).has("cv")) document.documentElement.classList.add("cv");
   // 舞台的 `data-screen` 一开始就得有值：否则第一帧里「哪一屏」是空的，
   // 而 CSS 只在 `[data-screen=…]` 上才切屏（空值什么都看不到）。
   // ⚠️ 但**别在别的视图上写 hash**：见 `applyStageScreen` 的注释（那会让人刷新一次就退回舞台）。
@@ -80,7 +101,10 @@ async function boot() {
   if (!info) showBanner("down");
   // 开了鉴权而页面还没带对 token ⇒ 立刻铺闸，别让人对着一张「已断开」的空页面猜。
   // ⚠️ 判据是 `/info.authRequired`（未授权时它**照样回 200**，只是少了本机路径那几格）。
-  if (app.core.authRequired && !app.core.token) {
+  // ⚠️ 头自己带 token 时**不铺闸**：这份 401 页面修不了（要换的是头上的 `-Token`）。
+  if (app.core.authRequired && app.core.authOwner === "head") {
+    showBanner("headAuth", { reason: "Cadenza 进程带去的 token 被核心拒了" });
+  } else if (app.core.authRequired && !app.core.token) {
     openTokenGate("核心开了鉴权（LILARA_AUTH=1），这个页面还没有 token");
   }
   app.core.subscribe("approvals");
@@ -167,19 +191,31 @@ function mountTabbar() {
 function onStatus(s) {
   const el = $("#conn");
   el.dataset.state = s;
-  el.querySelector(".conn-text").textContent = { open: "已连接", connecting: "连接中", closed: "已断开", origin: "被拒握手", auth: "要 token" }[s] || s;
-  el.title = app.core.wsUrl.replace(/\?token=.*$/, "?token=…");
+  // ⚠️ 「要 token」在代理模式下有两种身份：页面该填（旧形态），或者头带的那份被拒了
+  // （页面填不了）。同一个 `auth` 状态，说法必须跟着 `authOwner` 走，否则用户会去填一个假出口。
+  const headOwned = app.core.authOwner === "head";
+  el.querySelector(".conn-text").textContent = {
+    open: "已连接", connecting: "连接中", closed: "已断开",
+    origin: "被拒握手", auth: headOwned ? "上游验签失败" : "要 token",
+  }[s] || s;
+  // 代理模式下 WS 的地址是同源的 `/core/ws`，它不止一个 URL 可印——印**头在打的上游**更有用。
+  el.title = app.core.via === "head"
+    ? `${app.core.wsUrl}  →  ${app.core.upstreamUrl}/ws`
+    : app.core.wsUrl.replace(/\?token=.*$/, "?token=…");
   if (s === "open") { hideBanner(); }
   else if (s === "origin") showBanner("origin");
-  else if (s === "auth") showBanner("auth");
+  else if (s === "auth") { if (headOwned) showBanner("headAuth"); else showBanner("auth"); }
   else if (s === "closed") showBanner(app.core.info ? "ws" : "down");
   if (s === "closed" || s === "origin" || s === "auth") resetSubscriptions();
   renderStatus();
 }
 
-function showBanner(kind) {
+function showBanner(kind, detail) {
   const b = $("#banner");
   const i = app.core.info;
+  const head = app.core.via === "head";
+  // 上游报回来的那句话（头的 502 / 401 都把它写在 `error` 里）——比一句「没应答」有用得多。
+  const why = app.core.lastError?.message || "";
   if (kind === "origin") {
     const pat = i?.allowedOrigin || "?";
     // ⚠️ 白名单现在是**模式**（核心默认 `http://*:<头端口>`）：通配主机时「换到那个地址打开」
@@ -201,10 +237,30 @@ function showBanner(kind) {
       h("span", " 它开了鉴权（", h("code", "LILARA_AUTH=1"), "）：token 在核心的控制台启动横幅里（", h("code", "访问 token …"), " 那一行）。"),
       h("span.sp"),
       h("button.btn.btn-sm", { type: "button", onclick: () => openTokenGate("") }, "填 token"));
+  } else if (kind === "headAuth") {
+    // 代理模式下这份 401 只能由头的启动参数修好：页面填 token 是**修不了**的，所以不给闸。
+    swap(b, h("b", "核心拒绝了 Cadenza 进程带去的 token。"),
+      h("span", " 它每次启动都会换一个新的：把核心启动横幅里的那一行（", h("code", "访问 token …"), "）"
+        + "交给头，然后重启 Cadenza（", h("code", "-Token <token>"), " 或环境变量 ", h("code", "LILARA_CORE_TOKEN"), "）。"),
+      h("span.sp"),
+      h("span.dim", detail?.reason || ""));
   } else if (kind === "down") {
-    swap(b, h("b", "核心没应答。"), h("span", " 正在重连 ", h("code", app.core.base), "……先把核心起起来（", h("code", "dotnet run"), "）。"), h("span.sp"), h("button.btn.btn-sm", { type: "button", onclick: () => go("greenroom") }, "换核心地址"));
+    // ⚠️ 代理模式下「没应答」有三种来源，修法完全不同：核心没起来 / 头连不上上游（`-Core` 写错、
+    // 核心在别的机器上）/ 头的进程自己没在跑（那样这句根本打不出来，浏览器自己会报错）。
+    if (head) {
+      swap(b, h("b", "Cadenza 进程连不上核心。"),
+        h("span", " 页面这边走的是 ", h("code", app.core.displayUrl), "（头的源），它替页面连 ",
+          h("code", app.core.upstreamUrl), "，那头没应答。"),
+        why ? h("span.dim", "  ", why) : null,
+        h("span.sp"),
+        h("span.dim", "先把核心起起来；核心在别的机器上时给头 ", h("code", "-Core http://…"), "。"));
+    } else {
+      swap(b, h("b", "核心没应答。"), h("span", " 正在重连 ", h("code", app.core.base), "……先把核心起起来（", h("code", "dotnet run"), "）。"), h("span.sp"), h("button.btn.btn-sm", { type: "button", onclick: () => go("greenroom") }, "换核心地址"));
+    }
   } else {
-    swap(b, h("b", "WS 断了。"), h("span", " HTTP 还通，正在重连……"));
+    swap(b, h("b", "WS 断了。"), h("span", head
+      ? " HTTP 还通（说明头在、上游也在），正在重连……"
+      : " HTTP 还通，正在重连……"));
   }
   b.hidden = false;
 }
@@ -265,22 +321,28 @@ function jumpToCue() {
 }
 
 function renderStatus() {
+  tag("L:status");
   const sb = $("#statusbar");
   const rows = [...app.sessions.values()];
   const running = rows.filter((r) => r.status === "Running").length;
   const active = rows.filter((r) => r.active).length;
   const i = app.core?.info;
+  tag("L:status:swap");
   swap(sb,
     h("span.sb-item.sb-brand", "Cadenza ", h("b", VERSION)),
-    h("span.sb-item.sb-core", "核心 ", h("b", app.core?.base || "—")),
+    // 代理模式下这里印的是**页面在打的地址**（同源的 /core），上游那一格在后台「系统」页；
+    // 印 `base` 会在代理模式下变成一个空串，看起来像「没连上任何地方」。
+    h("span.sb-item.sb-core", app.core?.via === "head" ? "经 Cadenza 进程 " : "核心 ", h("b", app.core?.displayUrl || "—")),
     i ? h("span.sb-item.sb-ver", "v", h("b", i.coreVersion)) : null,
     // 只在核心说「要 token」时才占一格——默认不校验的核心上多一格就是噪音。
-    i?.authRequired ? h("span.sb-item", "鉴权 ", h("b", app.core.token ? "已带" : "要 token")) : null,
+    // ⚠️ 头自己带 token 时页面这一格没有「要求」可言：它该说的是「由谁交」。
+    i?.authRequired ? h("span.sb-item", "鉴权 ", h("b", app.core.authOwner === "head" ? "进程代持" : app.core.token ? "已带" : "要 token")) : null,
     h("span.sb-item", "会话 ", h("b", fmtNum(rows.length)), " · 在内存 ", h("b", fmtNum(active)), " · 演奏中 ", h("b", fmtNum(running))),
     h("span.sb-item", "提供商 ", h("b", fmtNum(app.providers.length))),
     h("span.sp"),
     i?.workingDirectory ? h("span.sb-item.sb-cwd", { title: "核心的工作目录" }, "⌂ ", h("b", i.workingDirectory)) : null,
     h("span.sb-item.sb-frames", "帧 ↓", h("b", fmtNum(app.core?.stats.in)), " ↑", h("b", fmtNum(app.core?.stats.out))));
+  tag("L:status:out");
 }
 
 function keyboard() {

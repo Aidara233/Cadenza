@@ -14,6 +14,7 @@ import { h, swap } from "./util.js";
 import { app, phaseOf, runtimeText, setCurrent, titleOf, isArchived } from "./model.js";
 import { STATUS } from "./stage.js";
 import { mixer } from "./mixer.js";
+import { tag } from "./watchdog.js";
 
 /** 相位里「有活计」的那三个（与节目单的 ♪ 计数同一判据：`phaseOf` 的四态之一）。 */
 const ACTIVE = new Set(["generating", "tools", "waiting"]);
@@ -38,6 +39,7 @@ export function mountRunState(root) {
 
 function render() {
   if (!S.root) return;
+  tag("L:runstate");
   const id = app.current;
   const row = id ? app.sessions.get(id) : null;
   const phase = id ? phaseOf(id) : "idle";
@@ -63,9 +65,8 @@ function render() {
     errs.map((r) => r.sessionId + (r.lastError?.at || "")).join(","),
     jobs?.running, jobs?.total, goal,
   ].join("|");
-  if (sig === S.sig) return;
+  if (sig === S.sig) { tag("L:runstate:out"); return; }
   S.sig = sig;
-
   swap(S.root,
     row ? currentChip(row, phase, err, retry) : null,
     // 顺序：自己的那一场 → 最需要你看一眼的（出错） → 其余环境信息。
@@ -73,6 +74,7 @@ function render() {
     others.length ? runsChip(others, !!row) : null,
     jobs?.running ? jobsChip(jobs) : null,
     goal ? goalChip() : null);
+  tag("L:runstate:out");
 }
 
 const goStage = () => app.bus.emit("goto", "stage");
@@ -179,9 +181,11 @@ function paintTitle() {
 
 /** 只动 chip 里时长那一个文本节点。停着的时候什么都不做（那些变化由 render 管）。 */
 function tick() {
+  tag("T:title");
   const row = app.current ? app.sessions.get(app.current) : null;
-  if (!row?.runSince) return;
+  if (!row?.runSince) { tag("T:title:out"); return; }
   const node = S.root?.querySelector(".rs-time");
   const text = runtimeText(row);
   if (node && node.textContent !== text) node.textContent = text;
+  tag("T:title:out");
 }
