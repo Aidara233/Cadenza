@@ -21,13 +21,16 @@ $Scripts = @($Scripts | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 if ($Auth -and -not $PSBoundParameters.ContainsKey("Scripts")) { $Scripts = @("17-auth") }
 $here = $PSScriptRoot
 $root = Split-Path $here -Parent
+# Moved 2026-11: this file lives in the merged repo (AgentLilarasCadenza); the two upstream
+# repos are submodules - core/ and head/ (this directory). Everything below is repo-relative.
+$repo = Split-Path $root -Parent
 New-Item -ItemType Directory -Force -Path "$Work\home", "$Work\proj\src", "$Work\shots" | Out-Null
 Set-Content -Path "$Work\proj\README.md" -Value "readme"
 
 if (-not $CoreExe) {
     # The core is a library since a128b28; the executable is the CLI host. Build the working tree
     # (it carries the retry.attempt work before it is committed).
-    $src = "E:\Workspace\AgentLilaraCode\src\Lilara.Cli\Lilara.Cli.csproj"
+    $src = Join-Path $repo "core\src\Lilara.Cli\Lilara.Cli.csproj"
     Write-Host "building core from $src"
     dotnet build $src -c Debug -o "$Work\core" | Out-Null
     # MUST stop here when the build fails (learned the hard way, 2026-10-28): PowerShell does not
@@ -46,7 +49,7 @@ $env:LILARA_HOME = "$Work\home"; $env:LILARA_PORT = "17989"; $env:LILARA_HEAD_PO
 # frontend, so sweep first. NOTE: keep this file pure ASCII - PowerShell 5.1 decodes a BOM-less
 # .ps1 with the local code page, and non-ASCII comments can kill the parse on GBK machines.
 Get-CimInstance Win32_Process | Where-Object {
-    $_.CommandLine -and $_.CommandLine -match 'serve\.ps1' -and $_.CommandLine -match '\-Port\s+17994'
+    $_.CommandLine -and $_.CommandLine -match 'lilara-relay' -and $_.CommandLine -match '(--port|-Port)\s+17994'
 } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force } catch { } }
 # LILARA_AUTH=1 is what makes the core check a token at all; unset it otherwise so a shell that
 # happens to export it cannot poison every other script.
@@ -56,7 +59,13 @@ if ($Auth) { $env:LILARA_AUTH = "1" } else { Remove-Item Env:LILARA_AUTH -ErrorA
 $coreRedir = if ($Auth) { " > `"$Work\core-out.log`" 2>&1" } else { "" }
 $core = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "ping -n 99999 127.0.0.1 >nul | `"$CoreExe`"$coreRedir" -WorkingDirectory "$Work\proj" -PassThru -WindowStyle Hidden
 $mock = Start-Process -FilePath "dotnet" -ArgumentList "run", "`"$here\mock.cs`"", "15799" -PassThru -WindowStyle Hidden
-$head = Start-Process -FilePath "powershell" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$root\serve.ps1`"", "-Port", "17994", "-Core", "http://127.0.0.1:17989", "-NoOpen" -PassThru -WindowStyle Hidden
+# The head host is the merged repo's relay (src/Lilara.Relay), not serve.ps1: the proxy is a
+# C# process now. --no-spawn because this script already started a core on 17989 and stays in
+# charge of its lifetime (tree kill in the finally block).
+$relay = Join-Path $repo "src\Lilara.Relay\Lilara.Relay.csproj"
+dotnet build $relay -c Debug -o "$Work\relay" | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "relay build failed (exit $LASTEXITCODE)" }
+$head = Start-Process -FilePath "$Work\relay\lilara-relay.exe" -ArgumentList "--port", "17994", "--bind", "127.0.0.1", "--core", "http://127.0.0.1:17989", "--root", "`"$root`"", "--no-open", "--no-spawn" -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 8
 
 $token = ""
