@@ -22,3 +22,6 @@ Thumbs.db
 # 本目录内的临时 / 冒烟产物（不是系统 /tmp）
 *.tmp
 
+
+# publish.ps1 的产物（静态包 + zip）
+publish/
