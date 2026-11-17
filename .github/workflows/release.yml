@@ -1,0 +1,55 @@
+# 推 v* 标签 → 出静态发布包并挂到 Release（任务线与核心仓同一套形状）。
+#
+#   git tag v1.1.0 && git push origin v1.1.0
+#
+# ⚠️ 跑在 ubuntu 上就够：这个头是**零构建**的（index.html + css/ + js/），publish.ps1 只做
+#    「抄文件 + 校验版本号 + 压 zip」，没有跨平台发布那类坑。用 pwsh 是因为脚本是 PowerShell。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 版本号（取自标签，去掉 v）
+        id: v
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: 出包
+        shell: pwsh
+        run: ./publish.ps1 -Version ${{ steps.v.outputs.version }}
+
+      - name: 挂到 Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $assets = @(Get-ChildItem publish -File | ForEach-Object { $_.FullName })
+          if (-not $assets) { throw "publish 里没有产物，别把空 release 发出去" }
+
+          $notes = @(
+            "Cadenza ${{ steps.v.outputs.version }}：零构建的浏览器头（index.html + css/ + js/），外加三份 serve 脚本。"
+            ""
+            "两种跑法：**纯静态宿主**也行（页面直连核心，Origin 白名单与 token 回落到浏览器）；"
+            "带上 ``serve.*`` 就多一层反代（页面只跟一个源说话，token 留在进程里）。"
+            ""
+            "想要「一条命令、核心也一起起起来」：用拼合仓 [AgentLilarasCadenza](https://github.com/Aidara233/AgentLilarasCadenza)。"
+          )
+          Set-Content -Path notes.md -Value $notes -Encoding utf8
+
+          gh release create $tag $assets --title "Cadenza $tag" --notes-file notes.md 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release upload $tag $assets --clobber
+          }
