@@ -1,6 +1,6 @@
 # 推 v* 标签 → 出静态发布包并挂到 Release（任务线与核心仓同一套形状）。
 #
-#   git tag v1.1.0 && git push origin v1.1.0
+#   git tag v1.2.0 && git push origin v1.2.0
 #
 # ⚠️ 跑在 ubuntu 上就够：这个头是**零构建**的（index.html + css/ + js/），publish.ps1 只做
 #    「抄文件 + 校验版本号 + 压 zip」，没有跨平台发布那类坑。用 pwsh 是因为脚本是 PowerShell。

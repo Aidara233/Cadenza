@@ -12,7 +12,7 @@ import { mountRunState } from "./runstate.js";
 import { openPalette } from "./palette.js";
 
 const VIEWS = ["stage", "score", "ledger", "greenroom"];
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 const ON_SHOW = { score: scoreShown, ledger: ledgerShown, greenroom: greenRoomShown };
 
 async function boot() {

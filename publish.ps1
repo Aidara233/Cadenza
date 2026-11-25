@@ -1,6 +1,6 @@
 ﻿# Cadenza 的发布包：一份能直接摆到任意静态宿主上的页面。
 #
-#   powershell -NoProfile -ExecutionPolicy Bypass -File publish.ps1 [-Version 1.1.0]
+#   powershell -NoProfile -ExecutionPolicy Bypass -File publish.ps1 [-Version 1.2.0]
 #
 # 产物：publish\cadenza-<version>.zip
 #
@@ -8,7 +8,7 @@
 #   · 只有静态文件也能用（页面直连核心）—— 但那样 `Origin` 白名单与 token 都回落到浏览器；
 #   · 带上 serve.ps1 / serve.sh / serve.py 就多一层反代（推荐）—— 页面只跟一个源说话。
 # ⚠️ 不带 `e2e/`：那是「怎么验证这个头」的记录（含 mock 上游与 trace 脚本），不是运行时要的东西。
-param([string]$Version = "1.1.0")
+param([string]$Version = "1.2.0")
 $ErrorActionPreference = "Stop"
 
 $root = $PSScriptRoot
